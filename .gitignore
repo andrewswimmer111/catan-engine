@@ -1,6 +1,7 @@
 # Virtual environments & local development artifacts
 .venv/
 .vscode/
+.idea/
 __pycache__/
 *.pyc
 
