@@ -19,7 +19,7 @@ Design contract
 
 Geometry
 --------
-Flat-top hex layout is used internally.  Axial coordinates (q, r).
+Ponty-top hex layout is used internally.  Axial coordinates (q, r).
 Each tile's 6 corners are computed from its Cartesian center using the
 standard 60°-step formula.  Shared corners between adjacent tiles are
 identified by quantizing floating-point coordinates to 6 decimal places
@@ -100,7 +100,8 @@ def build_standard_board() -> BoardTopology:
     Returns a ``BoardTopology`` where:
     * Every tile has ``resource=None`` and ``dice_number=None``.
     * All adjacency lists on Vertex and Edge objects are complete and correct.
-    * Port positions and types match the official Catan layout.
+    * Port positions match the official Catan layout. Port types are not
+      yet defined (PortType = None)
     * All IDs are stable integers in the ranges documented in this module.
     """
 
