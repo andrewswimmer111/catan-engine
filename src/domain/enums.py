@@ -4,21 +4,38 @@ No other module should redefine these values.
 
 Contract:
   - All other modules import from this file; they never redeclare these names.
-  - Resource contains only tradeable resources. Desert tile identity is
-    expressed as `Tile.resource: Resource | None` where None means desert.
-    Iterating over Resource members is therefore always safe without filtering.
+  - Resource.DESERT labels desert hex tiles. It is never banked, traded, or
+    drawn. Use :func:`tradeable_resources` when you need the five tradable
+    resource kinds only.
 """
 
 from enum import Enum
+from typing import Final
 
 
 class Resource(Enum):
-    """Tradeable resources only."""
+    """All resource-like tile and card kinds, including the desert label."""
     WOOD = "wood"
     BRICK = "brick"
     SHEEP = "sheep"
     WHEAT = "wheat"
     ORE = "ore"
+    DESERT = "desert"
+
+
+# Subset of ``Resource`` used by bank, trades, and player hands.
+_TRADEABLE: Final[tuple[Resource, ...]] = (
+    Resource.WOOD,
+    Resource.BRICK,
+    Resource.SHEEP,
+    Resource.WHEAT,
+    Resource.ORE,
+)
+
+
+def tradeable_resources() -> tuple[Resource, ...]:
+    """The five resource types that can be held, traded, and banked."""
+    return _TRADEABLE
 
 
 class DevCardType(Enum):
