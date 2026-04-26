@@ -240,8 +240,10 @@ def test_all_tile_ids_in_vertex_adjacency_are_valid(topo):
 # Port validity
 # ---------------------------------------------------------------------------
 
-def test_all_port_types_are_none(topo):
+def test_bare_layout_leaves_all_port_types_unassigned(topo):
+    """``build_standard_board`` fixes port positions; types are set at game init."""
     assert all(p.port_type is None for p in topo.ports)
+    assert all(v.port is None for v in topo.vertices.values())
 
 
 def test_all_port_vertices_are_in_graph(topo):

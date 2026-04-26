@@ -12,10 +12,12 @@ Design contract
       TileID   0-18   (axial spiral order, outermost ring first)
       VertexID 0-53   (insertion order during geometry sweep)
       EdgeID   0-71   (insertion order during geometry sweep)
-* Resources, dice numbers, port types are NOT assigned here.  Every tile is
-  returned with ``resource=None`` and ``dice_number=None``.  Resource assignment
-  is a separate, randomized step performed by the game engine.
-* Port *positions* are part of the static topology and ARE hardcoded here.
+* Tile resources and dice numbers are not assigned here: every tile is
+  returned with ``resource=None`` and ``dice_number=None`` until the engine
+  randomizes a scenario.
+* Port *vertex pairs* (where a port exists) are fixed here.  Port *types* are
+  assigned during the same randomized setup step as tile resources and numbers,
+  not in this factory.
 
 Geometry
 --------
@@ -30,14 +32,11 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Optional
-
 from domain.board.edge import Edge
 from domain.board.port import Port
 from domain.board.tile import Tile
 from domain.board.topology import BoardTopology
 from domain.board.vertex import Vertex
-from domain.enums import PortType
 from domain.ids import EdgeID, TileID, VertexID
 
 
@@ -100,8 +99,9 @@ def build_standard_board() -> BoardTopology:
     Returns a ``BoardTopology`` where:
     * Every tile has ``resource=None`` and ``dice_number=None``.
     * All adjacency lists on Vertex and Edge objects are complete and correct.
-    * Port positions match the official Catan layout. Port types are not
-      yet defined (PortType = None)
+    * Port *locations* (nine :class:`Port` records with vertex pairs) are set;
+      ``Port.port_type`` and ``Vertex.port`` stay ``None`` until the engine
+      assigns a randomized board (together with tile resources and numbers).
     * All IDs are stable integers in the ranges documented in this module.
     """
 
@@ -203,7 +203,7 @@ def build_standard_board() -> BoardTopology:
         coastal_vertex_ids, vertex_adj_vertices, vid_to_coord
     )
 
-    # Step 7 — assign port types to coastal vertex pairs
+    # Step 7 — record port vertex pairs (types assigned at game init with tile setup)
     # this assignment is counterclockwise with index 0 at max(y), min(x)
     # where max(y) is up and min(x) is left
     # the port layout is referenced from Colonist.io
@@ -220,7 +220,6 @@ def build_standard_board() -> BoardTopology:
         (27, 28)
     ]
 
-    # Port vertices do not carry a type yet; Vertex.port stays None.
     ports: list[Port] = []
 
     for ring_a, ring_b in _PORT_SLOT_INDICES:
@@ -245,7 +244,7 @@ def build_standard_board() -> BoardTopology:
             adjacent_vertices=frozenset(vertex_adj_vertices[VertexID(vid)]),
             adjacent_edges=frozenset(vertex_edge_ids[VertexID(vid)]),
             adjacent_tiles=frozenset(vertex_tile_ids[VertexID(vid)]),
-            port=None
+            port=None,
         )
         for vid in range(n_vertices)
     }

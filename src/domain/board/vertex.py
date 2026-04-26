@@ -26,8 +26,9 @@ class Vertex:
     ``adjacent_edges``     — the edges that touch this vertex (one per
                              adjacent vertex).
     ``adjacent_tiles``     — the tiles that share this vertex (1–3).
-    ``port``               — the PortType available here, or ``None`` if this
-                             vertex is not a port vertex.
+    ``port``               — the :class:`PortType` for this corner after setup
+                             randomization, or ``None`` in the bare board (even on
+                             port corners until types are assigned).
     """
 
     vertex_id: VertexID

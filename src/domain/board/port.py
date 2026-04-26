@@ -1,7 +1,7 @@
 """
-Immutable port descriptor.  A Port is a named trading ratio available at two
-adjacent coastal vertices.  It is part of the static board topology; port
-positions never change during a game.
+Immutable port descriptor.  A Port is a trading ratio at two adjacent coastal
+vertices.  ``layout`` only fixes *where* ports sit; ``port_type`` is filled when
+the engine randomizes the scenario (same phase as tile resources and numbers).
 """
 
 from __future__ import annotations
@@ -22,10 +22,8 @@ class Port:
     this port.  The ordering within the tuple is arbitrary but stable once
     assigned by ``layout.py``.
 
-    ``port_type`` is ``None`` when the bare topology has been constructed but
-    port types have not yet been assigned.  A separate assignment step
-    (analogous to resource/number assignment for tiles) fills this in before
-    a game begins.
+    ``port_type`` is ``None`` in the bare topology from :func:`build_standard_board`
+    and is set when ports are shuffled during game setup.
     """
 
     port_type: Optional[PortType]
