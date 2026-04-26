@@ -16,7 +16,7 @@ from domain.game.bank import Bank
 from domain.game.config import GameConfig
 from domain.game.dev_deck import DevelopmentDeck
 from domain.game.player_state import PlayerState
-from domain.ids import PlayerID, TileID
+from domain.ids import PlayerID, TileID, VertexID
 from domain.turn.pending import PendingEffect
 
 
@@ -42,6 +42,7 @@ class GameState:
     pending: Optional[PendingEffect] = None
     setup_order: list[PlayerID] = field(default_factory=list)
     setup_index: int = 0
+    last_settlement_vertex: Optional[VertexID] = None
     longest_road_holder: Optional[PlayerID] = None
     largest_army_holder: Optional[PlayerID] = None
     winner: Optional[PlayerID] = None

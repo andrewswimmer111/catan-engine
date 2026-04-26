@@ -17,7 +17,7 @@ from domain.game.bank import Bank
 from domain.game.config import GameConfig
 from domain.game.player_state import PlayerState
 from domain.game.state import GameState
-from domain.ids import PlayerID
+from domain.ids import PlayerID, VertexID
 from domain.turn.pending import PendingEffect
 
 
@@ -59,6 +59,7 @@ class PlayerView:
     pending: PendingEffect | None
     setup_order: list[PlayerID]
     setup_index: int
+    last_settlement_vertex: VertexID | None
     longest_road_holder: PlayerID | None
     largest_army_holder: PlayerID | None
     winner: PlayerID | None
@@ -98,6 +99,7 @@ def make_player_view(state: GameState, player_id: PlayerID) -> PlayerView:
         pending=state.pending,
         setup_order=list(state.setup_order),
         setup_index=state.setup_index,
+        last_settlement_vertex=state.last_settlement_vertex,
         longest_road_holder=state.longest_road_holder,
         largest_army_holder=state.largest_army_holder,
         winner=state.winner,
