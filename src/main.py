@@ -20,7 +20,6 @@ from domain.actions import all_actions as A
 from domain.actions.base import Action
 from domain.engine.game_engine import GameEngine
 from domain.engine.randomizer import SeededRandomizer
-from domain.enums import TurnPhase
 from domain.game.config import GameConfig
 from domain.game.state import GameState
 from domain.ids import PlayerID
@@ -48,9 +47,11 @@ def play(seed: int = 0, n_players: int = 4, max_steps: int = 5000) -> GameState:
     for step in range(max_steps):
         if state.is_terminal():
             break
-        legals = engine.legal_actions(state)
-        if not legals:
+        state = engine.resolve_if_no_legal_actions(state)
+        if state.is_terminal():
             break
+        legals = engine.legal_actions(state)
+        assert legals, "non-terminal state must have legal actions after resolve_if_no_legal_actions"
         action = _pick_action(legals, rng)
         state = engine.apply_action(state, action).state
     return state

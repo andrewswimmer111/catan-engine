@@ -24,6 +24,7 @@ from domain.enums import (
     BuildingType,
     DevCardType,
     DomesticTradeState,
+    EndReason,
     PortType,
     Resource,
     TurnPhase,
@@ -47,7 +48,7 @@ from domain.turn.pending import (
 
 # --- state snapshot version (bump if wire format changes) ---
 
-_STATE_VERSION = 1
+_STATE_VERSION = 2
 
 # --- small enum helpers ---
 
@@ -377,6 +378,8 @@ def encode_state(state: GameState) -> dict[str, Any]:
         "longest_road_holder": None if state.longest_road_holder is None else int(state.longest_road_holder),
         "largest_army_holder": None if state.largest_army_holder is None else int(state.largest_army_holder),
         "winner": None if state.winner is None else int(state.winner),
+        "end_reason": None if state.end_reason is None else _enum_name(state.end_reason),
+        "turns_since_vp_change": int(state.turns_since_vp_change),
     }
 
 
@@ -407,6 +410,10 @@ def decode_state(data: dict[str, Any]) -> GameState:
         if data.get("largest_army_holder") is None
         else PlayerID(int(data["largest_army_holder"])),
         winner=None if data.get("winner") is None else PlayerID(int(data["winner"])),
+        end_reason=None
+        if data.get("end_reason") is None
+        else _enum_by_name(EndReason, data["end_reason"]),
+        turns_since_vp_change=int(data.get("turns_since_vp_change", 0)),
     )
     return st
 
@@ -625,6 +632,12 @@ def encode_event(event: E.AnyGameEvent) -> dict[str, Any]:
             "turn_number": turn,
             "player_id": int(event.player_id),  # type: ignore[attr-defined]
         }
+    if isinstance(event, E.GameStalled):
+        return {
+            "type": t,
+            "turn_number": turn,
+            "reason": _enum_name(event.reason),  # type: ignore[attr-defined]
+        }
     raise TypeError(f"unhandled event {type(event)}")
 
 
@@ -731,5 +744,10 @@ def decode_event(data: dict[str, Any]) -> E.AnyGameEvent:
             turn_number=turn,
             player_id=PlayerID(int(data["player_id"])),
             victory_points=int(data["victory_points"]),
+        )
+    if t == "GameStalled":
+        return E.GameStalled(
+            turn_number=turn,
+            reason=_enum_by_name(EndReason, data["reason"]),
         )
     raise ValueError(f"unknown event type {t!r}")
