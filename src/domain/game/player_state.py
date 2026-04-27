@@ -30,3 +30,29 @@ class PlayerState:
 
     def can_afford(self, cost: dict[Resource, int]) -> bool:
         return all(self.resources.get(r, 0) >= c for r, c in cost.items())
+
+    def gain(self, gain: dict[Resource, int]) -> None:
+        """Add resources to this player's hand."""
+        for r, c in gain.items():
+            if c <= 0:
+                continue
+            self.resources[r] = self.resources.get(r, 0) + c
+
+    def pay(self, cost: dict[Resource, int]) -> None:
+        """Remove resources from this player's hand. Caller must have checked affordability."""
+        for r, c in cost.items():
+            if c <= 0:
+                continue
+            new = self.resources.get(r, 0) - c
+            if new <= 0:
+                self.resources.pop(r, None)
+            else:
+                self.resources[r] = new
+
+    def remove_dev_card(self, card: DevCardType) -> None:
+        """Remove the first matching unplayed dev card from this player's hand."""
+        for i, (c, _t) in enumerate(self.dev_cards_in_hand):
+            if c is card:
+                del self.dev_cards_in_hand[i]
+                return
+        raise ValueError(f"dev card {card} not in hand")
