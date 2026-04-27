@@ -6,9 +6,12 @@ Run from the project root:
     python -m src.main          # or
     PYTHONPATH=src python src/main.py
 
-The script picks the first legal action at each step (deterministic given the
-seed) and prints a final summary. It demonstrates that the engine can drive a
-complete game from setup through victory or a sane move-cap fallback.
+The script picks among legal actions at each step (deterministic given the
+seed) and prints a final summary.
+
+When you run ``python -m src.main`` or ``python src/main.py``, the seed comes
+from ``--seed`` (see :data:`DEFAULT_SEED`), not from the default argument of
+:func:`play` in your editor — change the CLI flag or the constant below.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from domain.game.state import GameState
 from domain.ids import PlayerID
 from domain.rules import victory
 
+DEFAULT_SEED = 2
+
 
 def _pick_action(actions: list[Action], rng: random.Random) -> Action:
     """Prefer ending the turn over endlessly proposing trades; otherwise pick at random."""
@@ -38,7 +43,7 @@ def _pick_action(actions: list[Action], rng: random.Random) -> Action:
     return rng.choice(actions)
 
 
-def play(seed: int = 0, n_players: int = 4, max_steps: int = 5000) -> GameState:
+def play(seed: int = DEFAULT_SEED, n_players: int = 4, max_steps: int = 5000) -> GameState:
     pids = [PlayerID(i) for i in range(n_players)]
     cfg = GameConfig(player_ids=pids, seed=seed)
     engine = GameEngine(SeededRandomizer(seed))
@@ -77,7 +82,7 @@ def _print_summary(state: GameState) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a smoke 4-player Catan game.")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--players", type=int, default=4, choices=(3, 4))
     parser.add_argument("--max-steps", type=int, default=5000)
     args = parser.parse_args()
