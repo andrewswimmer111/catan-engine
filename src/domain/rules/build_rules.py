@@ -14,7 +14,7 @@ from domain.actions.all_actions import (
 from domain.board.topology import BoardTopology
 from domain.enums import BuildingType, Resource, TurnPhase
 from domain.game.state import GameState
-from domain.ids import VertexID, PlayerID
+from domain.ids import EdgeID, PlayerID, VertexID
 from domain.turn.pending import RoadBuildingPending
 
 # --- Costs (Catan 4e-style) ---
