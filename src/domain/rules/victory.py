@@ -30,16 +30,15 @@ def compute_victory_points(state: GameState, player_id: PlayerID) -> int:
 
 def check_winner(state: GameState) -> PlayerID | None:
     """
-    If any player has ≥ 10 VP, the game ends. The *current* player is checked
-    first (they can win on their own turn before others are considered).
+    Return the winner only if the *current* player has reached 10+ VP.
+
+    A player can only declare victory on their own turn — hidden VP dev cards
+    are only revealed then, and the rules forbid winning on someone else's
+    turn even if a special-award transfer pushes a non-active player to 10.
     """
-    pids = state.config.player_ids
-    order: list[PlayerID] = [state.current_player] + [
-        x for x in pids if x != state.current_player
-    ]
-    for pid in order:
-        if compute_victory_points(state, pid) >= 10:
-            return pid
+    pid = state.current_player
+    if compute_victory_points(state, pid) >= 10:
+        return pid
     return None
 
 
