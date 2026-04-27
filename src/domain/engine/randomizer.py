@@ -8,9 +8,11 @@ runs can swap in a fixed :class:`SeededRandomizer` for full reproducibility.
 from __future__ import annotations
 
 import random
-from typing import Protocol
+from typing import Protocol, Sequence, TypeVar
 
 from domain.enums import DevCardType, Resource
+
+T = TypeVar("T")
 
 
 class Randomizer(Protocol):
@@ -30,6 +32,14 @@ class Randomizer(Protocol):
 
     def choose_stolen_resource(self, resources: list[Resource]) -> Resource:
         """Pick one element from a non-empty multiset of resource cards."""
+        ...
+
+    def shuffled(self, items: list[T]) -> list[T]:
+        """Return a new list with a uniform random permutation of ``items``."""
+        ...
+
+    def choice(self, items: Sequence[T]) -> T:
+        """Uniform draw from a non-empty ``items``."""
         ...
 
 
@@ -56,3 +66,13 @@ class SeededRandomizer:
         if not resources:
             raise ValueError("choose_stolen_resource requires a non-empty list")
         return self._rng.choice(resources)
+
+    def shuffled(self, items: list[T]) -> list[T]:
+        out = list(items)
+        self._rng.shuffle(out)
+        return out
+
+    def choice(self, items: Sequence[T]) -> T:
+        if not items:
+            raise ValueError("choice requires a non-empty sequence")
+        return self._rng.choice(list(items))

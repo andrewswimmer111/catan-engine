@@ -2,10 +2,9 @@
 Bank-backed resource movement: dice production, shortfall, and applying batches
 to player hands.
 
-Tile terrain, production numbers, and port types are assigned elsewhere (a
-future board-scenario step). Production and second-settlement grants only take
-effect once :class:`~domain.board.tile.Tile` has ``resource`` and ``dice_number``
-set as needed.
+Tile terrain, numbers, and harbors are assigned in
+:mod:`domain.board.scenario` during :meth:`GameEngine.new_game`. Production and
+second-settlement logic here assume that step has run.
 """
 
 from __future__ import annotations

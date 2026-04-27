@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from domain.actions.base import Action
 from domain.board.layout import build_standard_board
+from domain.board.scenario import assign_random_scenario, desert_tile_id
 from domain.board.occupancy import BoardOccupancy
 from domain.enums import TurnPhase
 from domain.game.bank import Bank
@@ -50,16 +51,18 @@ class GameEngine:
             raise NotImplementedError(
                 f"board variant {config.board_variant!r} is not supported; only 'standard' is implemented"
             )
-        topology = build_standard_board()
+        raw = build_standard_board()
+        topology = assign_random_scenario(raw, self._rng)
         pids = list(config.player_ids)
         players: dict[PlayerID, PlayerState] = {pid: PlayerState(player_id=pid) for pid in pids}
         setup_order = _snake_setup_order(pids)
         shuffled = self._rng.shuffle_dev_deck(standard_dev_deck_composition())
         current = setup_order[0] if setup_order else pids[0]
+        robber = desert_tile_id(topology)
         return GameState(
             config=config,
             topology=topology,
-            occupancy=BoardOccupancy(robber_tile=TileID(0)),
+            occupancy=BoardOccupancy(robber_tile=robber),
             players=players,
             bank=Bank(),
             dev_deck=DevelopmentDeck(cards=shuffled),
