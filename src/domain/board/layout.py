@@ -266,6 +266,117 @@ def build_standard_board() -> BoardTopology:
     )
 
 
+# Public helpers — geometric spiral order over the standard board
+
+def _standard_board_tile_coord() -> dict[TileID, tuple[int, int]]:
+    """Map every standard-board ``TileID`` to its axial ``(q, r)`` coordinate."""
+    return {TileID(i): coord for i, coord in enumerate(_axial_tiles(_RADIUS))}
+
+
+def _hex_distance(q: int, r: int) -> int:
+    """Hex grid distance from the origin to ``(q, r)`` in axial coordinates."""
+    return (abs(q) + abs(r) + abs(q + r)) // 2
+
+
+def _classify_rings_by_distance() -> dict[int, list[TileID]]:
+    """Group standard-board tile IDs by hex distance from the centre (0, 1, 2)."""
+    rings: dict[int, list[TileID]] = {0: [], 1: [], 2: []}
+    for tid, (q, r) in _standard_board_tile_coord().items():
+        rings[_hex_distance(q, r)].append(tid)
+    return rings
+
+
+def standard_board_outer_ring_tile_ids() -> list[TileID]:
+    """The 12 outer-ring tile IDs of the standard board, in TileID order."""
+    return sorted(_classify_rings_by_distance()[2])
+
+
+def standard_board_spiral_tile_ids(
+    *, start: TileID | None = None
+) -> list[TileID]:
+    """
+    Return the 19 tile IDs of the standard board in clockwise spiral order,
+    outermost ring first.
+
+    The walk is geometrically continuous: every consecutive pair of tile IDs
+    in the returned list shares a hex edge. It visits the outer ring (12
+    tiles) clockwise, steps inward to the middle ring (6 tiles), continues
+    clockwise, then ends on the centre tile.
+
+    ``start`` selects the outer-ring tile to begin from. When omitted, the
+    walk anchors at the outer-ring tile with the smallest polar angle
+    relative to the board centre — a deterministic but arbitrary choice.
+    Callers that need a randomized start should pick from
+    :func:`standard_board_outer_ring_tile_ids` and pass the result here.
+    """
+    tile_coord = _standard_board_tile_coord()
+    rings = _classify_rings_by_distance()
+
+    if start is not None and start not in rings[2]:
+        raise ValueError(
+            f"spiral start tile {start} is not on the outer ring; "
+            f"valid starts: {sorted(rings[2])}"
+        )
+
+    def cartesian_angle(tid: TileID) -> float:
+        x, y = _axial_to_cartesian(*tile_coord[tid])
+        return math.atan2(y, x)
+
+    def hex_adjacent(t1: TileID, t2: TileID) -> bool:
+        q1, r1 = tile_coord[t1]
+        q2, r2 = tile_coord[t2]
+        return _hex_distance(q1 - q2, r1 - r2) == 1
+
+    def cw_delta(from_tid: TileID, to_tid: TileID) -> float:
+        """Angular distance from ``from_tid`` to ``to_tid`` in the clockwise direction.
+
+        Hex axial geometry uses screen coordinates (y points down), so an
+        increasing :func:`math.atan2` value corresponds to clockwise rotation
+        about the board centre.
+        """
+        return (cartesian_angle(to_tid) - cartesian_angle(from_tid)) % (2 * math.pi)
+
+    def walk_ring_clockwise(ring: set[TileID], begin: TileID) -> list[TileID]:
+        out: list[TileID] = [begin]
+        remaining = ring - {begin}
+        cur = begin
+        while remaining:
+            same_ring = [t for t in remaining if hex_adjacent(cur, t)]
+            if not same_ring:
+                break
+            cur = min(same_ring, key=lambda t: cw_delta(cur, t))
+            out.append(cur)
+            remaining.discard(cur)
+        return out
+
+    outer_ring = set(rings[2])
+    middle_ring = set(rings[1])
+    centre_ring = set(rings[0])
+
+    spiral: list[TileID] = []
+    if outer_ring:
+        outer_start = start if start is not None else min(outer_ring, key=cartesian_angle)
+        spiral.extend(walk_ring_clockwise(outer_ring, outer_start))
+
+    if middle_ring:
+        last = spiral[-1] if spiral else min(middle_ring, key=cartesian_angle)
+        adj_in_ring = [t for t in middle_ring if hex_adjacent(last, t)]
+        if adj_in_ring:
+            inner_start = min(adj_in_ring, key=lambda t: cw_delta(last, t))
+        else:
+            inner_start = min(middle_ring, key=cartesian_angle)
+        spiral.extend(walk_ring_clockwise(middle_ring, inner_start))
+
+    spiral.extend(sorted(centre_ring))
+
+    if len(spiral) != len(tile_coord):
+        raise RuntimeError(
+            f"spiral order has {len(spiral)} tiles; expected {len(tile_coord)}. "
+            "Geometry is corrupt."
+        )
+    return spiral
+
+
 # Internal helper — coastal ring walker
 
 def _walk_coastal_ring(
