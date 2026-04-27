@@ -4,6 +4,8 @@ Maritime and domestic (player-to-player) trade legals.
 
 from __future__ import annotations
 
+from typing import Final
+
 from domain.actions.all_actions import (
     CancelDomesticTradeAction,
     ConfirmDomesticTradeAction,
@@ -16,6 +18,17 @@ from domain.enums import tradeable_resources
 from domain.game.state import GameState
 from domain.ids import PlayerID
 from domain.turn.pending import DomesticTradePending
+
+# Single-resource domestic-trade ratios: 1:1, N:1, and 1:N with N capped at 3.
+# Larger or asymmetric multi-resource bundles are intentionally omitted to keep
+# the action space finite; extend when the agent needs richer offers.
+_DOMESTIC_SINGLE_RESOURCE_RATIOS: Final[tuple[tuple[int, int], ...]] = (
+    (1, 1),
+    (2, 1),
+    (3, 1),
+    (1, 2),
+    (1, 3),
+)
 
 _TWO_ONE_FOR_RESOURCE: dict[PortType, Resource] = {
     PortType.WOOD_TWO: Resource.WOOD,
@@ -56,6 +69,8 @@ def legal_maritime_trades(state: GameState) -> list[MaritimeTradeAction]:
         if hand.get(give, 0) < ratio:
             continue
         for receive in tradeable_resources():
+            if receive is give:
+                continue
             if state.bank.resources.get(receive, 0) < 1:
                 continue
             out.append(
@@ -111,12 +126,16 @@ def legal_domestic_turn(state: GameState) -> list[
     return out
 
 
-def legal_propose_domestic_1_1(
+def legal_propose_domestic_single_resource(
     state: GameState,
 ) -> list[ProposeDomesticTradeAction]:
     """
-    Enumerate 1:1 single-resource openers (a finite subset; multi-card and
-    asymmetric offers are not listed here; extend when needed).
+    Enumerate single-resource domestic openers across distinct resource pairs.
+
+    Covered ratios (give_count : receive_count): 1:1, 2:1, 3:1, 1:2, 1:3.
+    ``give_count`` is gated by the proposer's hand; the request side is not
+    filtered by the responder's hand (the responder simply rejects if short).
+    Multi-resource bundle offers are not enumerated here.
     """
     if not _can_propose(state):
         return []
@@ -124,14 +143,18 @@ def legal_propose_domestic_1_1(
     hand = state.players[pid].resources
     out: list[ProposeDomesticTradeAction] = []
     for a in tradeable_resources():
+        held = hand.get(a, 0)
         for b in tradeable_resources():
             if a == b:
                 continue
-            if hand.get(a, 0) < 1:
-                continue
-            out.append(
-                ProposeDomesticTradeAction(
-                    player_id=pid, offer={a: 1}, request={b: 1}
+            for give_count, receive_count in _DOMESTIC_SINGLE_RESOURCE_RATIOS:
+                if held < give_count:
+                    continue
+                out.append(
+                    ProposeDomesticTradeAction(
+                        player_id=pid,
+                        offer={a: give_count},
+                        request={b: receive_count},
+                    )
                 )
-            )
     return out

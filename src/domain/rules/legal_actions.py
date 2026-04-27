@@ -58,7 +58,7 @@ def _main(state: GameState) -> list[Action]:
     out += build_rules.legal_build_cities(state)
     out += build_rules.legal_buy_dev_card(state)
     out += trade_rules.legal_maritime_trades(state)
-    out += trade_rules.legal_propose_domestic_1_1(state)
+    out += trade_rules.legal_propose_domestic_single_resource(state)
     out += build_rules.legal_end_turn(state)
     out += dev_card_rules.legal_dev_card_plays(state)
     return out
