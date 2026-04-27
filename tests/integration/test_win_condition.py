@@ -8,7 +8,7 @@ import pytest
 
 from domain.actions import all_actions as A
 from domain.engine.randomizer import SeededRandomizer
-from domain.enums import DevCardType, Resource, TurnPhase
+from domain.enums import DevCardType, EndReason, Resource, TurnPhase
 from domain.game.state import GameState
 from domain.ids import PlayerID
 from domain.rules import victory
@@ -32,6 +32,7 @@ def test_game_ends_with_winner_on_reaching_ten_victory_points() -> None:
     ).state
     assert s1.winner == pid
     assert s1.phase is TurnPhase.GAME_OVER
+    assert s1.end_reason is EndReason.WINNER
     assert s1.is_terminal()
 
 

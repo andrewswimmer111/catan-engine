@@ -45,7 +45,7 @@ def test_random_legal_ply_sequence_preserves_invariants(
     eng = GameEngine(SeededRandomizer(game_seed))
     for _ in range(num_steps):
         if s.is_terminal():
-            assert s.winner is not None
+            assert s.winner is not None or s.phase is TurnPhase.STALEMATE
             break
         acts = eng.legal_actions(s)
         if not acts:
@@ -58,4 +58,4 @@ def test_random_legal_ply_sequence_preserves_invariants(
         assert _bank_and_hands_non_negative(s)
         assert _at_most_one_occupant_per_slot(s)
         if s.is_terminal():
-            assert s.winner is not None
+            assert s.winner is not None or s.phase is TurnPhase.STALEMATE

@@ -6,7 +6,7 @@ import copy
 
 from domain.actions import all_actions as A
 from domain.engine.randomizer import SeededRandomizer
-from domain.enums import BuildingType, DevCardType, TurnPhase
+from domain.enums import BuildingType, DevCardType, EndReason, TurnPhase
 from domain.rules import build_rules, transitions, victory
 from tests.fixtures.states import post_setup_state
 
@@ -138,5 +138,6 @@ def test_knight_setting_largest_army_then_winning_keeps_game_over() -> None:
     )
     assert out.state.is_terminal()
     assert out.state.winner == pid
+    assert out.state.end_reason is EndReason.WINNER
     # GAME_OVER must persist — not be overwritten by MOVE_ROBBER.
     assert out.state.phase is TurnPhase.GAME_OVER
