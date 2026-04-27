@@ -1,11 +1,16 @@
 """
 State transitions: apply actions to a copied :class:`GameState` and collect events.
+
+Each public action is routed by type to a small handler function; handlers are
+registered in :data:`_HANDLERS` so adding a new action does not require editing
+a long if/elif chain.
 """
 
 from __future__ import annotations
 
 import copy
 from dataclasses import replace
+from typing import Callable
 
 from domain.actions import all_actions as A
 from domain.actions.base import Action
@@ -34,45 +39,29 @@ from domain.turn.pending import (
 )
 
 
-def _pay(pl, cost: dict[Resource, int]) -> None:
-    for r, c in cost.items():
-        pl.resources[r] = pl.resources.get(r, 0) - c
-        if pl.resources.get(r, 0) <= 0:
-            pl.resources.pop(r, None)
-
-
-def _take(pl, g: dict[Resource, int]) -> None:
-    for r, c in g.items():
-        pl.resources[r] = pl.resources.get(r, 0) + c
-
-
-def _remove_dev(p, card: DevCardType) -> None:
-    for i, (c, _t) in enumerate(p.dev_cards_in_hand):
-        if c is card:
-            del p.dev_cards_in_hand[i]
-            return
-    raise ValueError("dev card not in hand")
+# ----------------------------------------------------------------------
+# Post-action bookkeeping (awards + winner check)
+# ----------------------------------------------------------------------
 
 
 def _post_action(s: GameState, ev: list[GameEvent]) -> None:
+    """Recompute special awards and end the game if the current player has won."""
     _, lrc = lr_mod.update_longest_road_award(s)
     if lrc and s.longest_road_holder is not None:
-        hold = s.longest_road_holder
         ev.append(
             E.LongestRoadAwarded(
                 turn_number=s.turn_number,
-                player_id=hold,
-                length=lr_mod.compute_longest_road(s, hold),
+                player_id=s.longest_road_holder,
+                length=lr_mod.compute_longest_road(s, s.longest_road_holder),
             )
         )
-    _la, lac = victory.update_largest_army_award(s)
+    _, lac = victory.update_largest_army_award(s)
     if lac and s.largest_army_holder is not None:
-        hold2 = s.largest_army_holder
         ev.append(
             E.LargestArmyAwarded(
                 turn_number=s.turn_number,
-                player_id=hold2,
-                count=s.players[hold2].knights_played,
+                player_id=s.largest_army_holder,
+                count=s.players[s.largest_army_holder].knights_played,
             )
         )
     w = victory.check_winner(s)
@@ -88,13 +77,19 @@ def _post_action(s: GameState, ev: list[GameEvent]) -> None:
         )
 
 
-def _emit_res(dists: dict[PlayerID, dict[Resource, int]], turn: int) -> E.ResourcesDistributed | None:
-    if not any(dists.get(p, {}) for p in dists):
-        return None
-    clean = {p: m for p, m in dists.items() if m}
+def _emit_distribution(
+    distributions: dict[PlayerID, dict[Resource, int]], turn: int
+) -> E.ResourcesDistributed | None:
+    """Build a :class:`ResourcesDistributed` event, or ``None`` if no one received anything."""
+    clean = {p: m for p, m in distributions.items() if m}
     if not clean:
         return None
     return E.ResourcesDistributed(turn_number=turn, distributions=clean)
+
+
+# ----------------------------------------------------------------------
+# Action handlers
+# ----------------------------------------------------------------------
 
 
 def _place_settlement(
@@ -108,7 +103,9 @@ def _place_settlement(
     p.victory_points_public += 1
     events.append(
         E.SettlementBuilt(
-            turn_number=s.turn_number, player_id=action.player_id, vertex_id=action.vertex_id
+            turn_number=s.turn_number,
+            player_id=action.player_id,
+            vertex_id=action.vertex_id,
         )
     )
     s.last_settlement_vertex = action.vertex_id
@@ -118,10 +115,9 @@ def _place_settlement(
         granted, sfs = resource_rules.grant_from_bank(
             s, action.player_id, wanted, s.turn_number
         )
-        for sf in sfs:
-            events.append(sf)
+        events.extend(sfs)
         if granted:
-            er = _emit_res({action.player_id: granted}, s.turn_number)
+            er = _emit_distribution({action.player_id: granted}, s.turn_number)
             if er is not None:
                 events.append(er)
     _post_action(s, events)
@@ -134,15 +130,16 @@ def _place_road(
     _ = rng
     events: list[GameEvent] = [
         E.RoadBuilt(
-            turn_number=s.turn_number, player_id=action.player_id, edge_id=action.edge_id
+            turn_number=s.turn_number,
+            player_id=action.player_id,
+            edge_id=action.edge_id,
         )
     ]
     s.occupancy.roads[action.edge_id] = action.player_id
     s.players[action.player_id].roads_built += 1
     s.last_settlement_vertex = None
     s.setup_index += 1
-    n = len(s.setup_order)
-    if s.setup_index >= n:
+    if s.setup_index >= len(s.setup_order):
         s.phase = TurnPhase.ROLL
         s.current_player = s.setup_order[0]
         s.turn_number = 1
@@ -178,12 +175,11 @@ def _roll_dice(
             s.pending = RobberMovePending(return_phase=TurnPhase.MAIN)
         return s, events
     dists, sfs = resource_rules.distribute_resources(s, total)
-    for sf in sfs:
-        events.append(sf)
+    events.extend(sfs)
     if any(m for m in dists.values() if m):
-        apply_block = {p: m for p, m in dists.items() if m}
-        resource_rules.apply_distribution(s, apply_block)
-        er = _emit_res(apply_block, s.turn_number)
+        block = {p: m for p, m in dists.items() if m}
+        resource_rules.apply_distribution(s, block)
+        er = _emit_distribution(block, s.turn_number)
         if er is not None:
             events.append(er)
     s.phase = TurnPhase.MAIN
@@ -198,21 +194,25 @@ def _build_road(
     pid = action.player_id
     p = s.players[pid]
     if s.phase is TurnPhase.MAIN:
-        _pay(p, build_rules.ROAD_COST)
+        p.pay(build_rules.ROAD_COST)
     s.occupancy.roads[action.edge_id] = pid
     p.roads_built += 1
     events: list[GameEvent] = [
         E.RoadBuilt(turn_number=s.turn_number, player_id=pid, edge_id=action.edge_id)
     ]
-    if s.phase is TurnPhase.BUILD_ROADS and isinstance(
-        s.pending, RoadBuildingPending
-    ):
+    if s.phase is TurnPhase.BUILD_ROADS and isinstance(s.pending, RoadBuildingPending):
         nxt = s.pending.roads_remaining - 1
         if nxt <= 0:
             s.pending = None
             s.phase = TurnPhase.MAIN
         else:
             s.pending = RoadBuildingPending(roads_remaining=nxt)
+            # Auto-end if no further legal road placements remain (e.g., player is
+            # boxed in or has placed their 15th piece). Without this the engine
+            # would deadlock — legal_actions returns [] in BUILD_ROADS with no roads.
+            if not build_rules.legal_build_roads(s):
+                s.pending = None
+                s.phase = TurnPhase.MAIN
     _post_action(s, events)
     return s, events
 
@@ -221,34 +221,42 @@ def _build_settlement(
     s: GameState, action: A.BuildSettlementAction, rng: Randomizer
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
-    _pay(s.players[action.player_id], build_rules.SETTLEMENT_COST)
-    s.occupancy.buildings[action.vertex_id] = (action.player_id, BuildingType.SETTLEMENT)
     p = s.players[action.player_id]
+    p.pay(build_rules.SETTLEMENT_COST)
+    s.occupancy.buildings[action.vertex_id] = (action.player_id, BuildingType.SETTLEMENT)
     p.settlements_built += 1
-    ev: list[GameEvent] = [
+    p.victory_points_public += 1
+    events: list[GameEvent] = [
         E.SettlementBuilt(
-            turn_number=s.turn_number, player_id=action.player_id, vertex_id=action.vertex_id
+            turn_number=s.turn_number,
+            player_id=action.player_id,
+            vertex_id=action.vertex_id,
         )
     ]
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _build_city(
     s: GameState, action: A.BuildCityAction, rng: Randomizer
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
-    pid = action.player_id
-    _pay(s.players[pid], build_rules.CITY_COST)
-    s.occupancy.buildings[action.vertex_id] = (pid, BuildingType.CITY)
-    p = s.players[pid]
+    p = s.players[action.player_id]
+    p.pay(build_rules.CITY_COST)
+    s.occupancy.buildings[action.vertex_id] = (action.player_id, BuildingType.CITY)
     p.settlements_built -= 1
     p.cities_built += 1
-    ev: list[GameEvent] = [
-        E.CityBuilt(turn_number=s.turn_number, player_id=pid, vertex_id=action.vertex_id)
+    # Settlement => City: +1 VP (settlement is 1, city is 2).
+    p.victory_points_public += 1
+    events: list[GameEvent] = [
+        E.CityBuilt(
+            turn_number=s.turn_number,
+            player_id=action.player_id,
+            vertex_id=action.vertex_id,
+        )
     ]
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _buy_dev(
@@ -256,14 +264,15 @@ def _buy_dev(
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
     pid = action.player_id
-    _pay(s.players[pid], build_rules.DEV_CARD_COST)
+    p = s.players[pid]
+    p.pay(build_rules.DEV_CARD_COST)
     c = s.dev_deck.draw()
-    s.players[pid].dev_cards_in_hand.append((c, s.turn_number))
-    ev: list[GameEvent] = [
+    p.dev_cards_in_hand.append((c, s.turn_number))
+    events: list[GameEvent] = [
         E.DevCardBought(turn_number=s.turn_number, player_id=pid, card_type=c)
     ]
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _maritime(
@@ -271,21 +280,23 @@ def _maritime(
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
     pid = action.player_id
-    pl = s.players[pid]
-    b = s.bank
-    g = {action.give: action.give_count}
-    r = {action.receive: 1}
-    _pay(pl, g)
-    b.deposit(g)
-    b.withdraw(r)
-    _take(pl, r)
-    ev: list[GameEvent] = [
+    p = s.players[pid]
+    give = {action.give: action.give_count}
+    receive = {action.receive: 1}
+    p.pay(give)
+    s.bank.deposit(give)
+    s.bank.withdraw(receive)
+    p.gain(receive)
+    events: list[GameEvent] = [
         E.MaritimeTradeCompleted(
-            turn_number=s.turn_number, player_id=pid, gave=action.give, received=action.receive
+            turn_number=s.turn_number,
+            player_id=pid,
+            gave=action.give,
+            received=action.receive,
         )
     ]
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _propose(
@@ -317,38 +328,39 @@ def _confirm_domestic(
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
     assert isinstance(s.pending, DomesticTradePending)
-    oth = action.trade_with
+    other = action.trade_with
     proposer = s.current_player
-    if oth == proposer:
+    if other == proposer:
         raise ValueError("cannot trade with self")
-    if s.pending.responses.get(oth) is not DomesticTradeState.ACCEPTED:
+    if s.pending.responses.get(other) is not DomesticTradeState.ACCEPTED:
         raise ValueError("target did not accept")
     pend = s.pending
-    a, b = s.players[proposer], s.players[oth]
+    a, b = s.players[proposer], s.players[other]
     if not a.can_afford(pend.offer) or not b.can_afford(pend.request):
         raise ValueError("insufficient resources to confirm")
-    _pay(a, pend.offer)
-    _take(b, pend.offer)
-    _pay(b, pend.request)
-    _take(a, pend.request)
+    a.pay(pend.offer)
+    b.gain(pend.offer)
+    b.pay(pend.request)
+    a.gain(pend.request)
     s.pending = None
-    ev: list[GameEvent] = [
+    events: list[GameEvent] = [
         E.TradeCompleted(
             turn_number=s.turn_number,
             player1_id=proposer,
-            player2_id=oth,
+            player2_id=other,
             player1_gives=dict(pend.offer),
             player2_gives=dict(pend.request),
         )
     ]
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _cancel_domestic(
     s: GameState, action: A.CancelDomesticTradeAction, rng: Randomizer
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
+    _ = action
     s.pending = None
     return s, []
 
@@ -357,16 +369,15 @@ def _end_turn(
     s: GameState, action: A.EndTurnAction, rng: Randomizer
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
-    ended = s.turn_number
-    ended_p = s.current_player
-    s.players[ended_p].has_played_dev_card_this_turn = False
+    _ = action
+    ended_turn = s.turn_number
+    ended_pid = s.current_player
+    s.players[ended_pid].has_played_dev_card_this_turn = False
     pids = s.config.player_ids
-    i = pids.index(s.current_player)
-    s.current_player = pids[(i + 1) % len(pids)]
+    s.current_player = pids[(pids.index(s.current_player) + 1) % len(pids)]
     s.turn_number += 1
     s.phase = TurnPhase.ROLL
-    ev: list[GameEvent] = [E.TurnEnded(turn_number=ended, player_id=ended_p)]
-    return s, ev
+    return s, [E.TurnEnded(turn_number=ended_turn, player_id=ended_pid)]
 
 
 def _discard_resources(
@@ -375,57 +386,62 @@ def _discard_resources(
     _ = rng
     if s.phase is not TurnPhase.DISCARD or not isinstance(s.pending, DiscardPending):
         raise ValueError("not in discard")
-    p = action.player_id
     pend = s.pending
-    if p not in pend.cards_to_discard:
+    pid = action.player_id
+    if pid not in pend.cards_to_discard:
         raise ValueError("no discard expected for this player")
-    need = pend.cards_to_discard[p]
-    g = {r: c for r, c in action.resources.items() if c}
-    if sum(g.values()) != need:
+    need = pend.cards_to_discard[pid]
+    given = {r: c for r, c in action.resources.items() if c}
+    if sum(given.values()) != need:
         raise ValueError("wrong discard size")
-    pl = s.players[p]
-    if not pl.can_afford(g):
+    p = s.players[pid]
+    if not p.can_afford(given):
         raise ValueError("cannot pay discard")
-    _pay(pl, g)
-    s.bank.deposit(g)
-    ev: list[GameEvent] = [
-        E.PlayerDiscarded(turn_number=s.turn_number, player_id=p, resources=dict(g))
+    p.pay(given)
+    s.bank.deposit(given)
+    events: list[GameEvent] = [
+        E.PlayerDiscarded(
+            turn_number=s.turn_number, player_id=pid, resources=dict(given)
+        )
     ]
-    rest = {k: v for k, v in pend.cards_to_discard.items() if k != p}
+    rest = {k: v for k, v in pend.cards_to_discard.items() if k != pid}
     if not rest:
         s.pending = RobberMovePending(return_phase=TurnPhase.MAIN)
         s.phase = TurnPhase.MOVE_ROBBER
     else:
         s.pending = DiscardPending(cards_to_discard=rest)
-    return s, ev
+    return s, events
 
 
 def _move_robber(
     s: GameState, action: A.MoveRobberAction, rng: Randomizer
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
-    if s.phase is not TurnPhase.MOVE_ROBBER or not isinstance(s.pending, RobberMovePending):
+    if s.phase is not TurnPhase.MOVE_ROBBER or not isinstance(
+        s.pending, RobberMovePending
+    ):
         raise ValueError("not moving robber")
     pid = action.player_id
     if pid != s.current_player:
         raise ValueError("only current player may move the robber")
-    dest = action.tile_id
-    if dest == s.occupancy.robber_tile:
+    if action.tile_id == s.occupancy.robber_tile:
         raise ValueError("must move the robber to a different tile")
-    ret = s.pending.return_phase
-    s.occupancy.robber_tile = dest
-    ev: list[GameEvent] = [
-        E.RobberMoved(turn_number=s.turn_number, player_id=pid, tile_id=dest)
+    return_phase = s.pending.return_phase
+    s.occupancy.robber_tile = action.tile_id
+    events: list[GameEvent] = [
+        E.RobberMoved(
+            turn_number=s.turn_number, player_id=pid, tile_id=action.tile_id
+        )
     ]
-    victims = robber_rules.players_adjacent_to_tile(s, dest, pid)
+    victims = robber_rules.players_adjacent_to_tile(s, action.tile_id, pid)
     if not victims:
         s.pending = None
-        s.phase = ret
-        _post_action(s, ev)
-        return s, ev
-    s.pending = StealPending(valid_targets=victims, return_phase=ret)
+        s.phase = return_phase
+        _post_action(s, events)
+        return s, events
+    s.pending = StealPending(valid_targets=victims, return_phase=return_phase)
     s.phase = TurnPhase.STEAL
-    return s, ev
+    return s, events
 
 
 def _steal_resource(
@@ -447,21 +463,24 @@ def _steal_resource(
     if not bag:
         s.phase = pend.return_phase
         s.pending = None
-        ev_empty: list[GameEvent] = []
-        _post_action(s, ev_empty)
-        return s, ev_empty
-    st = rng.choose_stolen_resource(bag)
-    _pay(victim, {st: 1})
-    _take(s.players[by], {st: 1})
-    ev: list[GameEvent] = [
+        events_empty: list[GameEvent] = []
+        _post_action(s, events_empty)
+        return s, events_empty
+    stolen = rng.choose_stolen_resource(bag)
+    victim.pay({stolen: 1})
+    s.players[by].gain({stolen: 1})
+    events: list[GameEvent] = [
         E.ResourceStolen(
-            turn_number=s.turn_number, by_player_id=by, from_player_id=target, resource=st
+            turn_number=s.turn_number,
+            by_player_id=by,
+            from_player_id=target,
+            resource=stolen,
         )
     ]
     s.pending = None
     s.phase = pend.return_phase
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _play_knight(
@@ -471,18 +490,23 @@ def _play_knight(
     pid = action.player_id
     p = s.players[pid]
     return_phase = s.phase
-    if return_phase is not TurnPhase.ROLL and return_phase is not TurnPhase.MAIN:
+    if return_phase not in (TurnPhase.ROLL, TurnPhase.MAIN):
         raise ValueError("knight in wrong phase")
-    _remove_dev(p, DevCardType.KNIGHT)
+    p.remove_dev_card(DevCardType.KNIGHT)
+    p.dev_cards_played.append(DevCardType.KNIGHT)
     p.knights_played += 1
     p.has_played_dev_card_this_turn = True
-    ev: list[GameEvent] = [
-        E.DevCardPlayed(turn_number=s.turn_number, player_id=pid, card_type=DevCardType.KNIGHT)
+    events: list[GameEvent] = [
+        E.DevCardPlayed(
+            turn_number=s.turn_number, player_id=pid, card_type=DevCardType.KNIGHT
+        )
     ]
-    _post_action(s, ev)
+    # Set the next phase BEFORE recomputing awards so a winning largest-army
+    # award (which would set phase=GAME_OVER inside _post_action) is preserved.
     s.pending = RobberMovePending(return_phase=return_phase)
     s.phase = TurnPhase.MOVE_ROBBER
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
 def _play_road_building(
@@ -491,22 +515,30 @@ def _play_road_building(
     _ = rng
     pid = action.player_id
     p = s.players[pid]
-    _remove_dev(p, DevCardType.ROAD_BUILDING)
+    p.remove_dev_card(DevCardType.ROAD_BUILDING)
+    p.dev_cards_played.append(DevCardType.ROAD_BUILDING)
     p.has_played_dev_card_this_turn = True
-    left = 15 - p.roads_built
-    n = min(2, max(0, left))
-    ev1: list[GameEvent] = [
-        E.DevCardPlayed(turn_number=s.turn_number, player_id=pid, card_type=DevCardType.ROAD_BUILDING)
+    events: list[GameEvent] = [
+        E.DevCardPlayed(
+            turn_number=s.turn_number,
+            player_id=pid,
+            card_type=DevCardType.ROAD_BUILDING,
+        )
     ]
-    if n == 0:
+    free = min(2, max(0, build_rules.MAX_ROADS - p.roads_built))
+    if free == 0:
         s.phase = TurnPhase.MAIN
         s.pending = None
-        _post_action(s, ev1)
-        return s, ev1
-    s.pending = RoadBuildingPending(roads_remaining=n)
+        _post_action(s, events)
+        return s, events
+    s.pending = RoadBuildingPending(roads_remaining=free)
     s.phase = TurnPhase.BUILD_ROADS
-    _post_action(s, ev1)
-    return s, ev1
+    # If no legal placements at all, immediately revert.
+    if not build_rules.legal_build_roads(s):
+        s.pending = None
+        s.phase = TurnPhase.MAIN
+    _post_action(s, events)
+    return s, events
 
 
 def _play_yop(
@@ -515,44 +547,49 @@ def _play_yop(
     _ = rng
     pid = action.player_id
     p = s.players[pid]
-    b = s.bank
-    r1, r2 = action.resource1, action.resource2
-    _remove_dev(p, DevCardType.YEAR_OF_PLENTY)
+    p.remove_dev_card(DevCardType.YEAR_OF_PLENTY)
+    p.dev_cards_played.append(DevCardType.YEAR_OF_PLENTY)
     p.has_played_dev_card_this_turn = True
-    tbank = sum(b.resources.get(x, 0) for x in tradeable_resources())
-    if tbank == 0:
+
+    bank_total = sum(s.bank.resources.get(r, 0) for r in tradeable_resources())
+    if bank_total == 0:
         raise ValueError("bank has no tradeable resources")
+
     got: dict[Resource, int] = {}
-    if tbank == 1:
+    if bank_total == 1:
         for r in tradeable_resources():
-            if b.resources.get(r, 0) >= 1:
+            if s.bank.resources.get(r, 0) >= 1:
                 take = {r: 1}
-                b.withdraw(take)
-                _take(p, take)
+                s.bank.withdraw(take)
+                p.gain(take)
                 got = dict(take)
                 break
     else:
+        r1, r2 = action.resource1, action.resource2
         if r1 is r2:
-            if b.resources.get(r1, 0) < 2:
+            if s.bank.resources.get(r1, 0) < 2:
                 raise ValueError("not enough of that resource in the bank")
         else:
-            if b.resources.get(r1, 0) < 1 or b.resources.get(r2, 0) < 1:
+            if s.bank.resources.get(r1, 0) < 1 or s.bank.resources.get(r2, 0) < 1:
                 raise ValueError("bank cannot pay that pair")
         for r in (r1, r2):
-            w = {r: 1}
-            b.withdraw(w)
-            _take(p, w)
+            take = {r: 1}
+            s.bank.withdraw(take)
+            p.gain(take)
             got[r] = got.get(r, 0) + 1
-    ev2 = _emit_res({pid: got}, s.turn_number)
-    out: list[GameEvent] = [
+
+    events: list[GameEvent] = [
         E.DevCardPlayed(
-            turn_number=s.turn_number, player_id=pid, card_type=DevCardType.YEAR_OF_PLENTY
+            turn_number=s.turn_number,
+            player_id=pid,
+            card_type=DevCardType.YEAR_OF_PLENTY,
         )
     ]
-    if ev2 is not None:
-        out.append(ev2)
-    _post_action(s, out)
-    return s, out
+    er = _emit_distribution({pid: got}, s.turn_number)
+    if er is not None:
+        events.append(er)
+    _post_action(s, events)
+    return s, events
 
 
 def _play_monopoly(
@@ -561,69 +598,68 @@ def _play_monopoly(
     _ = rng
     pid = action.player_id
     p = s.players[pid]
-    r = action.resource
-    _remove_dev(p, DevCardType.MONOPOLY)
+    p.remove_dev_card(DevCardType.MONOPOLY)
+    p.dev_cards_played.append(DevCardType.MONOPOLY)
     p.has_played_dev_card_this_turn = True
+    r = action.resource
     for opid in s.config.player_ids:
         if opid == pid:
             continue
-        o = s.players[opid]
-        n = o.resources.get(r, 0)
+        other = s.players[opid]
+        n = other.resources.get(r, 0)
         if n:
-            o.resources.pop(r, None)
+            other.resources.pop(r, None)
             p.resources[r] = p.resources.get(r, 0) + n
-    ev: list[GameEvent] = [
-        E.DevCardPlayed(turn_number=s.turn_number, player_id=pid, card_type=DevCardType.MONOPOLY)
+    events: list[GameEvent] = [
+        E.DevCardPlayed(
+            turn_number=s.turn_number, player_id=pid, card_type=DevCardType.MONOPOLY
+        )
     ]
-    _post_action(s, ev)
-    return s, ev
+    _post_action(s, events)
+    return s, events
 
 
-def _route(s: GameState, action: Action, rng: Randomizer) -> tuple[GameState, list[GameEvent]]:
-    if isinstance(action, A.PlaceSettlementAction):
-        return _place_settlement(s, action, rng)
-    if isinstance(action, A.PlaceRoadAction):
-        return _place_road(s, action, rng)
-    if isinstance(action, A.RollDiceAction):
-        return _roll_dice(s, action, rng)
-    if isinstance(action, A.DiscardResourcesAction):
-        return _discard_resources(s, action, rng)
-    if isinstance(action, A.MoveRobberAction):
-        return _move_robber(s, action, rng)
-    if isinstance(action, A.StealResourceAction):
-        return _steal_resource(s, action, rng)
-    if isinstance(action, A.BuildRoadAction):
-        return _build_road(s, action, rng)
-    if isinstance(action, A.BuildSettlementAction):
-        return _build_settlement(s, action, rng)
-    if isinstance(action, A.BuildCityAction):
-        return _build_city(s, action, rng)
-    if isinstance(action, A.BuyDevCardAction):
-        return _buy_dev(s, action, rng)
-    if isinstance(action, A.MaritimeTradeAction):
-        return _maritime(s, action, rng)
-    if isinstance(action, A.ProposeDomesticTradeAction):
-        return _propose(s, action, rng)
-    if isinstance(action, A.RespondDomesticTradeAction):
-        return _respond(s, action, rng)
-    if isinstance(action, A.ConfirmDomesticTradeAction):
-        return _confirm_domestic(s, action, rng)
-    if isinstance(action, A.CancelDomesticTradeAction):
-        return _cancel_domestic(s, action, rng)
-    if isinstance(action, A.EndTurnAction):
-        return _end_turn(s, action, rng)
-    if isinstance(action, A.PlayKnightAction):
-        return _play_knight(s, action, rng)
-    if isinstance(action, A.PlayRoadBuildingAction):
-        return _play_road_building(s, action, rng)
-    if isinstance(action, A.PlayYearOfPlentyAction):
-        return _play_yop(s, action, rng)
-    if isinstance(action, A.PlayMonopolyAction):
-        return _play_monopoly(s, action, rng)
-    raise NotImplementedError(f"no transition for {type(action).__name__}")
+# ----------------------------------------------------------------------
+# Action -> handler dispatch
+# ----------------------------------------------------------------------
+
+_Handler = Callable[[GameState, Action, Randomizer], tuple[GameState, list[GameEvent]]]
+
+_HANDLERS: dict[type, _Handler] = {
+    A.PlaceSettlementAction: _place_settlement,  # type: ignore[dict-item]
+    A.PlaceRoadAction: _place_road,  # type: ignore[dict-item]
+    A.RollDiceAction: _roll_dice,  # type: ignore[dict-item]
+    A.DiscardResourcesAction: _discard_resources,  # type: ignore[dict-item]
+    A.MoveRobberAction: _move_robber,  # type: ignore[dict-item]
+    A.StealResourceAction: _steal_resource,  # type: ignore[dict-item]
+    A.BuildRoadAction: _build_road,  # type: ignore[dict-item]
+    A.BuildSettlementAction: _build_settlement,  # type: ignore[dict-item]
+    A.BuildCityAction: _build_city,  # type: ignore[dict-item]
+    A.BuyDevCardAction: _buy_dev,  # type: ignore[dict-item]
+    A.MaritimeTradeAction: _maritime,  # type: ignore[dict-item]
+    A.ProposeDomesticTradeAction: _propose,  # type: ignore[dict-item]
+    A.RespondDomesticTradeAction: _respond,  # type: ignore[dict-item]
+    A.ConfirmDomesticTradeAction: _confirm_domestic,  # type: ignore[dict-item]
+    A.CancelDomesticTradeAction: _cancel_domestic,  # type: ignore[dict-item]
+    A.EndTurnAction: _end_turn,  # type: ignore[dict-item]
+    A.PlayKnightAction: _play_knight,  # type: ignore[dict-item]
+    A.PlayRoadBuildingAction: _play_road_building,  # type: ignore[dict-item]
+    A.PlayYearOfPlentyAction: _play_yop,  # type: ignore[dict-item]
+    A.PlayMonopolyAction: _play_monopoly,  # type: ignore[dict-item]
+}
+
+
+def _route(
+    s: GameState, action: Action, rng: Randomizer
+) -> tuple[GameState, list[GameEvent]]:
+    handler = _HANDLERS.get(type(action))
+    if handler is None:
+        raise NotImplementedError(f"no transition for {type(action).__name__}")
+    return handler(s, action, rng)
 
 
 def apply(rng: Randomizer, state: GameState, action: Action) -> StepResult:
+    """Apply ``action`` to a deep-copied ``state`` and return the resulting :class:`StepResult`."""
     new_state = copy.deepcopy(state)
     new_state, events = _route(new_state, action, rng)
     return StepResult(
