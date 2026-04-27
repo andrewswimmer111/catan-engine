@@ -20,6 +20,7 @@ from domain.enums import (
     BuildingType,
     DevCardType,
     DomesticTradeState,
+    EndReason,
     Resource,
     TurnPhase,
     tradeable_resources,
@@ -29,6 +30,7 @@ from domain.events.base import GameEvent
 from domain.game.state import GameState
 from domain.ids import PlayerID
 from domain.rules import build_rules, resource_rules, robber_rules, setup_rules, victory
+from domain.rules.legal_actions import legal_actions as rules_legal_actions
 from domain.rules import longest_road as lr_mod
 from domain.turn.pending import (
     DiscardPending,
@@ -42,6 +44,60 @@ from domain.turn.pending import (
 # ----------------------------------------------------------------------
 # Post-action bookkeeping (awards + winner check)
 # ----------------------------------------------------------------------
+
+VP_STALL_TURN_THRESHOLD = 200
+
+
+def _all_players_at_full_build_expansion(state: GameState) -> bool:
+    """True when every player has placed all settlement tokens and city upgrades."""
+    for pl in state.players.values():
+        if pl.settlements_built + pl.cities_built < build_rules.MAX_SETTLEMENTS:
+            return False
+        if pl.cities_built < build_rules.MAX_CITIES:
+            return False
+    return True
+
+
+def _no_progress_possible(state: GameState) -> bool:
+    """
+    Conservative deadlock heuristic: full build expansion for all seats, no dev
+    draws possible, and no one is at win threshold on the full VP tally.
+
+    Unapplicable in standard 10 VP Catan game, here for extension.
+    """
+    if state.winner is not None:
+        return False
+    if any(
+        victory.compute_victory_points(state, p) >= 10
+        for p in state.config.player_ids
+    ):
+        return False
+    if not _all_players_at_full_build_expansion(state):
+        return False
+    if state.dev_deck.remaining() == 0:
+        return True
+    return not any(
+        pl.can_afford(build_rules.DEV_CARD_COST) for pl in state.players.values()
+    )
+
+
+def _maybe_stalemate(s: GameState, ev: list[GameEvent]) -> None:
+    if s.winner is not None or s.phase is TurnPhase.GAME_OVER:
+        return
+    if s.phase is TurnPhase.STALEMATE:
+        return
+    if _no_progress_possible(s):
+        s.phase = TurnPhase.STALEMATE
+        s.end_reason = EndReason.STALEMATE_NO_PROGRESS
+        ev.append(
+            E.GameStalled(turn_number=s.turn_number, reason=EndReason.STALEMATE_NO_PROGRESS)
+        )
+    elif s.turns_since_vp_change > VP_STALL_TURN_THRESHOLD:
+        s.phase = TurnPhase.STALEMATE
+        s.end_reason = EndReason.STALEMATE_VP_STALL
+        ev.append(
+            E.GameStalled(turn_number=s.turn_number, reason=EndReason.STALEMATE_VP_STALL)
+        )
 
 
 def _post_action(s: GameState, ev: list[GameEvent]) -> None:
@@ -68,6 +124,7 @@ def _post_action(s: GameState, ev: list[GameEvent]) -> None:
     if w is not None:
         s.winner = w
         s.phase = TurnPhase.GAME_OVER
+        s.end_reason = EndReason.WINNER
         ev.append(
             E.GameWon(
                 turn_number=s.turn_number,
@@ -377,7 +434,10 @@ def _end_turn(
     s.current_player = pids[(pids.index(s.current_player) + 1) % len(pids)]
     s.turn_number += 1
     s.phase = TurnPhase.ROLL
-    return s, [E.TurnEnded(turn_number=ended_turn, player_id=ended_pid)]
+    s.turns_since_vp_change += 1
+    events: list[GameEvent] = [E.TurnEnded(turn_number=ended_turn, player_id=ended_pid)]
+    _post_action(s, events)
+    return s, events
 
 
 def _discard_resources(
@@ -660,8 +720,25 @@ def _route(
 
 def apply(rng: Randomizer, state: GameState, action: Action) -> StepResult:
     """Apply ``action`` to a deep-copied ``state`` and return the resulting :class:`StepResult`."""
+    old_vp = {
+        pid: victory.compute_victory_points(state, pid) for pid in state.config.player_ids
+    }
     new_state = copy.deepcopy(state)
     new_state, events = _route(new_state, action, rng)
+    new_vp = {
+        pid: victory.compute_victory_points(new_state, pid)
+        for pid in new_state.config.player_ids
+    }
+    if any(new_vp[p] > old_vp[p] for p in old_vp):
+        new_state.turns_since_vp_change = 0
+    # Stalemate runs after VP stall accounting so a same-step VP gain cannot
+    # incorrectly trip the VP-stall threshold (see _maybe_stalemate).
+    if not (
+        new_state.winner is not None
+        or new_state.phase
+        in (TurnPhase.GAME_OVER, TurnPhase.STALEMATE)
+    ):
+        _maybe_stalemate(new_state, events)
     return StepResult(
         state=new_state,
         events=events,
@@ -669,3 +746,18 @@ def apply(rng: Randomizer, state: GameState, action: Action) -> StepResult:
         winner=new_state.winner,
         action=action,
     )
+
+
+def resolve_no_legal_actions(state: GameState) -> GameState:
+    """
+    Terminal stalemate for a non-terminal state with no legal actions (e.g. setup edge case).
+    Does not emit events; use after ``legal_actions`` is verified empty.
+    """
+    s = copy.deepcopy(state)
+    if s.is_terminal():
+        return s
+    if rules_legal_actions(s):
+        return s
+    s.phase = TurnPhase.STALEMATE
+    s.end_reason = EndReason.STALEMATE_NO_PROGRESS
+    return s

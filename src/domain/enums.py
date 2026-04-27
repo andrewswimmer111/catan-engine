@@ -88,7 +88,16 @@ class TurnPhase(Enum):
     BUILD_ROADS = "build_roads"
     YEAR_OF_PLENTY_SELECT = "year_of_plenty_select"
     MONOPOLY_SELECT = "monopoly_select"
+    STALEMATE = "stalemate"
     GAME_OVER = "game_over"
+
+
+class EndReason(Enum):
+    """Why the game ended: win or a detected stall/deadlock."""
+
+    WINNER = "winner"
+    STALEMATE_NO_PROGRESS = "stalemate_no_progress"
+    STALEMATE_VP_STALL = "stalemate_vp_stall"
 
 
 class DomesticTradeState(Enum):

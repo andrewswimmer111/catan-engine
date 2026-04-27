@@ -11,7 +11,7 @@ from typing import Optional
 
 from domain.board.occupancy import BoardOccupancy
 from domain.board.topology import BoardTopology
-from domain.enums import TurnPhase
+from domain.enums import EndReason, TurnPhase
 from domain.game.bank import Bank
 from domain.game.config import GameConfig
 from domain.game.dev_deck import DevelopmentDeck
@@ -46,13 +46,18 @@ class GameState:
     longest_road_holder: Optional[PlayerID] = None
     largest_army_holder: Optional[PlayerID] = None
     winner: Optional[PlayerID] = None
+    end_reason: Optional[EndReason] = None
+    turns_since_vp_change: int = 0
 
     @property
     def robber_tile(self) -> TileID:
         return self.occupancy.robber_tile
 
     def is_terminal(self) -> bool:
-        return self.phase == TurnPhase.GAME_OVER or self.winner is not None
+        return (
+            self.phase in (TurnPhase.GAME_OVER, TurnPhase.STALEMATE)
+            or self.winner is not None
+        )
 
     def active_player(self) -> PlayerState:
         return self.players[self.current_player]

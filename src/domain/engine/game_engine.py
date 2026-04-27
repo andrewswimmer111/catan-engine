@@ -82,5 +82,9 @@ class GameEngine:
             raise IllegalActionError("action is not legal in the current state")
         return transitions.apply(self._rng, state, action)
 
+    def resolve_if_no_legal_actions(self, state: GameState) -> GameState:
+        """Terminal stalemate when the position has no legal moves (engine source of truth)."""
+        return transitions.resolve_no_legal_actions(state)
+
     def player_view(self, state: GameState, player_id: PlayerID) -> PlayerView:
         return make_player_view(state, player_id)

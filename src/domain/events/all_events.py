@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 
-from domain.enums import DevCardType, Resource
+from domain.enums import DevCardType, EndReason, Resource
 from domain.ids import EdgeID, PlayerID, TileID, VertexID
 
 
@@ -137,6 +137,12 @@ class GameWon:
     victory_points: int
 
 
+@dataclass(frozen=True)
+class GameStalled:
+    turn_number: int
+    reason: EndReason
+
+
 AnyGameEvent = Union[
     DiceRolled,
     ResourcesDistributed,
@@ -155,4 +161,5 @@ AnyGameEvent = Union[
     LargestArmyAwarded,
     TurnEnded,
     GameWon,
+    GameStalled,
 ]
