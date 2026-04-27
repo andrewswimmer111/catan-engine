@@ -23,11 +23,14 @@ import domain.events.all_events as E
 from domain.events.base import GameEvent
 from domain.game.state import GameState
 from domain.ids import PlayerID
-from domain.rules import build_rules, resource_rules, setup_rules, victory
+from domain.rules import build_rules, resource_rules, robber_rules, setup_rules, victory
 from domain.rules import longest_road as lr_mod
 from domain.turn.pending import (
+    DiscardPending,
     DomesticTradePending,
+    RobberMovePending,
     RoadBuildingPending,
+    StealPending,
 )
 
 
@@ -165,6 +168,15 @@ def _roll_dice(
             total=total,
         )
     ]
+    if total == 7:
+        cards = robber_rules.cards_to_discard_on_seven(s)
+        if cards:
+            s.phase = TurnPhase.DISCARD
+            s.pending = DiscardPending(cards_to_discard=dict(cards))
+        else:
+            s.phase = TurnPhase.MOVE_ROBBER
+            s.pending = RobberMovePending(return_phase=TurnPhase.MAIN)
+        return s, events
     dists, sfs = resource_rules.distribute_resources(s, total)
     for sf in sfs:
         events.append(sf)
@@ -357,12 +369,110 @@ def _end_turn(
     return s, ev
 
 
+def _discard_resources(
+    s: GameState, action: A.DiscardResourcesAction, rng: Randomizer
+) -> tuple[GameState, list[GameEvent]]:
+    _ = rng
+    if s.phase is not TurnPhase.DISCARD or not isinstance(s.pending, DiscardPending):
+        raise ValueError("not in discard")
+    p = action.player_id
+    pend = s.pending
+    if p not in pend.cards_to_discard:
+        raise ValueError("no discard expected for this player")
+    need = pend.cards_to_discard[p]
+    g = {r: c for r, c in action.resources.items() if c}
+    if sum(g.values()) != need:
+        raise ValueError("wrong discard size")
+    pl = s.players[p]
+    if not pl.can_afford(g):
+        raise ValueError("cannot pay discard")
+    _pay(pl, g)
+    s.bank.deposit(g)
+    ev: list[GameEvent] = [
+        E.PlayerDiscarded(turn_number=s.turn_number, player_id=p, resources=dict(g))
+    ]
+    rest = {k: v for k, v in pend.cards_to_discard.items() if k != p}
+    if not rest:
+        s.pending = RobberMovePending(return_phase=TurnPhase.MAIN)
+        s.phase = TurnPhase.MOVE_ROBBER
+    else:
+        s.pending = DiscardPending(cards_to_discard=rest)
+    return s, ev
+
+
+def _move_robber(
+    s: GameState, action: A.MoveRobberAction, rng: Randomizer
+) -> tuple[GameState, list[GameEvent]]:
+    _ = rng
+    if s.phase is not TurnPhase.MOVE_ROBBER or not isinstance(s.pending, RobberMovePending):
+        raise ValueError("not moving robber")
+    pid = action.player_id
+    if pid != s.current_player:
+        raise ValueError("only current player may move the robber")
+    dest = action.tile_id
+    if dest == s.occupancy.robber_tile:
+        raise ValueError("must move the robber to a different tile")
+    ret = s.pending.return_phase
+    s.occupancy.robber_tile = dest
+    ev: list[GameEvent] = [
+        E.RobberMoved(turn_number=s.turn_number, player_id=pid, tile_id=dest)
+    ]
+    victims = robber_rules.players_adjacent_to_tile(s, dest, pid)
+    if not victims:
+        s.pending = None
+        s.phase = ret
+        _post_action(s, ev)
+        return s, ev
+    s.pending = StealPending(valid_targets=victims, return_phase=ret)
+    s.phase = TurnPhase.STEAL
+    return s, ev
+
+
+def _steal_resource(
+    s: GameState, action: A.StealResourceAction, rng: Randomizer
+) -> tuple[GameState, list[GameEvent]]:
+    if not isinstance(s.pending, StealPending):
+        raise ValueError("not stealing")
+    by = s.current_player
+    if action.player_id != by:
+        raise ValueError("steal is by current player only")
+    target = action.target_player_id
+    pend = s.pending
+    if target not in pend.valid_targets:
+        raise ValueError("invalid theft target")
+    victim = s.players[target]
+    bag: list[Resource] = []
+    for r, c in victim.resources.items():
+        bag.extend([r] * c)
+    if not bag:
+        s.phase = pend.return_phase
+        s.pending = None
+        ev_empty: list[GameEvent] = []
+        _post_action(s, ev_empty)
+        return s, ev_empty
+    st = rng.choose_stolen_resource(bag)
+    _pay(victim, {st: 1})
+    _take(s.players[by], {st: 1})
+    ev: list[GameEvent] = [
+        E.ResourceStolen(
+            turn_number=s.turn_number, by_player_id=by, from_player_id=target, resource=st
+        )
+    ]
+    s.pending = None
+    s.phase = pend.return_phase
+    _post_action(s, ev)
+    return s, ev
+
+
 def _play_knight(
     s: GameState, action: A.PlayKnightAction, rng: Randomizer
 ) -> tuple[GameState, list[GameEvent]]:
     _ = rng
     pid = action.player_id
     p = s.players[pid]
+    return_phase = s.phase
+    if return_phase is not TurnPhase.ROLL and return_phase is not TurnPhase.MAIN:
+        raise ValueError("knight in wrong phase")
     _remove_dev(p, DevCardType.KNIGHT)
     p.knights_played += 1
     p.has_played_dev_card_this_turn = True
@@ -370,6 +480,8 @@ def _play_knight(
         E.DevCardPlayed(turn_number=s.turn_number, player_id=pid, card_type=DevCardType.KNIGHT)
     ]
     _post_action(s, ev)
+    s.pending = RobberMovePending(return_phase=return_phase)
+    s.phase = TurnPhase.MOVE_ROBBER
     return s, ev
 
 
@@ -474,6 +586,12 @@ def _route(s: GameState, action: Action, rng: Randomizer) -> tuple[GameState, li
         return _place_road(s, action, rng)
     if isinstance(action, A.RollDiceAction):
         return _roll_dice(s, action, rng)
+    if isinstance(action, A.DiscardResourcesAction):
+        return _discard_resources(s, action, rng)
+    if isinstance(action, A.MoveRobberAction):
+        return _move_robber(s, action, rng)
+    if isinstance(action, A.StealResourceAction):
+        return _steal_resource(s, action, rng)
     if isinstance(action, A.BuildRoadAction):
         return _build_road(s, action, rng)
     if isinstance(action, A.BuildSettlementAction):

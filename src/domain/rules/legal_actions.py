@@ -9,8 +9,8 @@ from domain.actions import all_actions as A
 from domain.actions.base import Action
 from domain.enums import TurnPhase
 from domain.game.state import GameState
-from domain.rules import build_rules, dev_card_rules, setup_rules, trade_rules
-from domain.turn.pending import DomesticTradePending
+from domain.rules import build_rules, dev_card_rules, robber_rules, setup_rules, trade_rules
+from domain.turn.pending import DomesticTradePending, DiscardPending
 
 
 def legal_actions(state: GameState) -> list[Action]:
@@ -22,6 +22,12 @@ def legal_actions(state: GameState) -> list[Action]:
         return list(setup_rules.legal_setup_roads(state))
     if isinstance(state.pending, DomesticTradePending):
         return list(trade_rules.legal_domestic_turn(state))
+    if p is TurnPhase.DISCARD and isinstance(state.pending, DiscardPending):
+        return list(robber_rules.legal_discard_actions(state))
+    if p is TurnPhase.MOVE_ROBBER:
+        return list(robber_rules.legal_robber_moves(state))
+    if p is TurnPhase.STEAL:
+        return list(robber_rules.legal_steal_actions(state))
     if p is TurnPhase.BUILD_ROADS:
         return list(build_rules.legal_build_roads(state))
     if p is TurnPhase.ROLL:
