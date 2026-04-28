@@ -41,6 +41,46 @@ from domain.board.hex_geometry import (
     axial_tiles as _axial_tiles,
     hex_distance as _hex_distance,
 )
+
+# ---------------------------------------------------------------------------
+# Internal geometry sweep — single source of truth for coordinate/ID layout
+# ---------------------------------------------------------------------------
+
+def _geometry_sweep() -> tuple[
+    list[tuple[int, int]],
+    dict[tuple[int, int], TileID],
+    dict[tuple[float, float], VertexID],
+    dict[TileID, list[VertexID]],
+    dict[VertexID, set[TileID]],
+]:
+    """Run the axial-coordinate sweep that assigns all TileIDs and VertexIDs.
+
+    Returns (axial_coords, coord_to_tile_id, coord_to_vertex_id,
+             tile_corner_ids, vertex_tile_ids).
+    """
+    axial_coords: list[tuple[int, int]] = _axial_tiles(_RADIUS)
+    coord_to_tile_id: dict[tuple[int, int], TileID] = {
+        coord: TileID(i) for i, coord in enumerate(axial_coords)
+    }
+
+    coord_to_vertex_id: dict[tuple[float, float], VertexID] = {}
+    tile_corner_ids: dict[TileID, list[VertexID]] = {}
+    vertex_tile_ids: dict[VertexID, set[TileID]] = defaultdict(set)
+
+    for coord in axial_coords:
+        tile_id = coord_to_tile_id[coord]
+        cx, cy = _axial_to_cartesian(*coord)
+        corners = [_quantize(c) for c in _hex_corners(cx, cy)]
+        corner_ids: list[VertexID] = []
+        for raw_coord in corners:
+            if raw_coord not in coord_to_vertex_id:
+                coord_to_vertex_id[raw_coord] = VertexID(len(coord_to_vertex_id))
+            vid = coord_to_vertex_id[raw_coord]
+            corner_ids.append(vid)
+            vertex_tile_ids[vid].add(tile_id)
+        tile_corner_ids[tile_id] = corner_ids
+
+    return axial_coords, coord_to_tile_id, coord_to_vertex_id, tile_corner_ids, vertex_tile_ids
 from domain.board.port import Port
 from domain.board.tile import Tile
 from domain.board.topology import BoardTopology
@@ -63,37 +103,10 @@ def build_standard_board() -> BoardTopology:
     * All IDs are stable integers in the ranges documented in this module.
     """
 
-    # Step 1 — enumerate tiles, assign TileIDs
-
-    axial_coords: list[tuple[int, int]] = _axial_tiles(_RADIUS)
-    # axial_coord -> TileID
-    coord_to_tile_id: dict[tuple[int, int], TileID] = {
-        coord: TileID(i) for i, coord in enumerate(axial_coords)
-    }
-
-    # Step 2 — compute all tile corners; deduplicate into Vertex objects
-
-    # quantised_coord -> VertexID  (assigned in first-seen order)
-    coord_to_vertex_id: dict[tuple[float, float], VertexID] = {}
-
-    # TileID -> list[VertexID] (length 6, corner indices 0-5)
-    tile_corner_ids: dict[TileID, list[VertexID]] = {}
-
-    # VertexID -> set of TileIDs that share this vertex
-    vertex_tile_ids: dict[VertexID, set[TileID]] = defaultdict(set)
-
-    for coord in axial_coords:
-        tile_id = coord_to_tile_id[coord]
-        cx, cy = _axial_to_cartesian(*coord)
-        corners = [_quantize(c) for c in _hex_corners(cx, cy)]
-        corner_ids: list[VertexID] = []
-        for raw_coord in corners:
-            if raw_coord not in coord_to_vertex_id:
-                coord_to_vertex_id[raw_coord] = VertexID(len(coord_to_vertex_id))
-            vid = coord_to_vertex_id[raw_coord]
-            corner_ids.append(vid)
-            vertex_tile_ids[vid].add(tile_id)
-        tile_corner_ids[tile_id] = corner_ids
+    # Steps 1-2 — enumerate tiles and deduplicate corners via shared sweep
+    axial_coords, coord_to_tile_id, coord_to_vertex_id, tile_corner_ids, vertex_tile_ids = (
+        _geometry_sweep()
+    )
 
     n_vertices = len(coord_to_vertex_id)  # should be 54
 
@@ -222,6 +235,40 @@ def build_standard_board() -> BoardTopology:
         edges=edges,
         ports=tuple(ports),
     )
+
+
+# Public coordinate accessor
+
+def standard_board_coordinates() -> tuple[
+    dict[TileID, tuple[float, float]],
+    dict[VertexID, tuple[float, float]],
+]:
+    """Return pixel-space coordinates keyed by stable IDs.
+
+    Replays the same axial sweep used by ``build_standard_board()`` so that
+    TileID and VertexID assignments are guaranteed to be identical.
+
+    Returns:
+        tile_centers:   TileID → (x, y) Cartesian centre of that hex.
+        vertex_coords:  VertexID → (x, y) quantized corner position.
+    """
+    axial_coords, coord_to_tile_id, coord_to_vertex_id, _, _ = _geometry_sweep()
+
+    tile_centers: dict[TileID, tuple[float, float]] = {
+        coord_to_tile_id[coord]: _axial_to_cartesian(*coord)
+        for coord in axial_coords
+    }
+    vertex_coords: dict[VertexID, tuple[float, float]] = {
+        vid: qcoord for qcoord, vid in coord_to_vertex_id.items()
+    }
+
+    # Sanity: vertex ID set must exactly match a freshly-built topology.
+    _topo = build_standard_board()
+    assert vertex_coords.keys() == _topo.vertices.keys(), (
+        "standard_board_coordinates: vertex keys do not match topology vertex IDs"
+    )
+
+    return tile_centers, vertex_coords
 
 
 # Public helpers — geometric spiral order over the standard board
