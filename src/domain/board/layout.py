@@ -33,61 +33,19 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from domain.board.edge import Edge
+from domain.board.hex_geometry import (
+    RADIUS as _RADIUS,
+    axial_to_cartesian as _axial_to_cartesian,
+    hex_corners as _hex_corners,
+    quantize as _quantize,
+    axial_tiles as _axial_tiles,
+    hex_distance as _hex_distance,
+)
 from domain.board.port import Port
 from domain.board.tile import Tile
 from domain.board.topology import BoardTopology
 from domain.board.vertex import Vertex
 from domain.ids import EdgeID, TileID, VertexID
-
-
-# Internal geometry constants
-_RADIUS = 2          # hex grid radius → 19 tiles
-_SIZE   = 1.0        # circumradius of each hex (unit hex)
-_PREC   = 6          # decimal places used to quantise corner coordinates
-
-
-# Internal geometry helpers
-def _axial_to_cartesian(q: int, r: int) -> tuple[float, float]:
-    """Convert axial hex coordinates to pointy-top Cartesian (x, y)."""
-    x = _SIZE * (math.sqrt(3) * q + math.sqrt(3) / 2 * r)
-    y = _SIZE * (3 / 2 * r)
-    return x, y
-
-
-def _hex_corners(cx: float, cy: float) -> list[tuple[float, float]]:
-    """
-    Return the 6 corners of a  pointy-top hex centred at (cx, cy), ordered
-    at angles 30°, 90°, 150°, 210°, 270°, 330° from the positive x-axis.
-    The ordering defines which corner is at index i for all tiles uniformly.
-    """
-    corners = []
-    for i in range(6):
-        angle_rad = math.pi / 6 + math.pi / 3 * i
-        corners.append((
-            cx + _SIZE * math.cos(angle_rad),
-            cy + _SIZE * math.sin(angle_rad),
-        ))
-    return corners
-
-
-def _quantize(pt: tuple[float, float]) -> tuple[float, float]:
-    """Round a 2-D point to _PREC decimal places for deduplication."""
-    return (round(pt[0], _PREC), round(pt[1], _PREC))
-
-
-def _axial_tiles(radius: int) -> list[tuple[int, int]]:
-    """
-    Return all axial (q, r) coordinates within the given hex radius,
-    in a consistent sweep order (q outer, r inner).
-    This order is used to assign stable TileIDs.
-    """
-    coords: list[tuple[int, int]] = []
-    for q in range(-radius, radius + 1):
-        r_min = max(-radius, -q - radius)
-        r_max = min(radius, -q + radius)
-        for r in range(r_min, r_max + 1):
-            coords.append((q, r))
-    return coords
 
 
 # Public factory
@@ -271,11 +229,6 @@ def build_standard_board() -> BoardTopology:
 def _standard_board_tile_coord() -> dict[TileID, tuple[int, int]]:
     """Map every standard-board ``TileID`` to its axial ``(q, r)`` coordinate."""
     return {TileID(i): coord for i, coord in enumerate(_axial_tiles(_RADIUS))}
-
-
-def _hex_distance(q: int, r: int) -> int:
-    """Hex grid distance from the origin to ``(q, r)`` in axial coordinates."""
-    return (abs(q) + abs(r) + abs(q + r)) // 2
 
 
 def _classify_rings_by_distance() -> dict[int, list[TileID]]:
