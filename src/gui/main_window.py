@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QMainWindow
+from PySide6.QtWidgets import QMainWindow
 
 from controller.session import GameSession, GameSnapshot
+from gui.widgets.board_canvas import BoardCanvas
 
 
 class MainWindow(QMainWindow):
@@ -11,9 +12,8 @@ class MainWindow(QMainWindow):
         self._session = session
         self.setWindowTitle("Catan Engine")
 
-        placeholder = QLabel("board goes here")
-        placeholder.setAlignment(placeholder.alignment())
-        self.setCentralWidget(placeholder)
+        self._canvas = BoardCanvas(session)
+        self.setCentralWidget(self._canvas)
 
         menu = self.menuBar().addMenu("File")
         menu.addAction("Quit", self.close)
@@ -29,3 +29,4 @@ class MainWindow(QMainWindow):
 
     def refresh(self, snap: GameSnapshot) -> None:
         self._update_status(snap)
+        self._canvas.refresh(snap)
