@@ -19,8 +19,8 @@ from __future__ import annotations
 import argparse
 import random
 
-from domain.actions import all_actions as A
-from domain.actions.base import Action
+from controller.agents import ScriptedAgent
+from controller.session import GameSnapshot
 from domain.engine.game_engine import GameEngine
 from domain.engine.randomizer import SeededRandomizer
 from domain.game.config import GameConfig
@@ -31,24 +31,12 @@ from domain.rules import victory
 DEFAULT_SEED = 2
 
 
-def _pick_action(actions: list[Action], rng: random.Random) -> Action:
-    """Prefer ending the turn over endlessly proposing trades; otherwise pick at random."""
-    end_turn = [a for a in actions if isinstance(a, A.EndTurnAction)]
-    proposals = {A.ProposeDomesticTradeAction, A.MaritimeTradeAction}
-    non_trade = [a for a in actions if type(a) not in proposals]
-    if end_turn and rng.random() < 0.35:
-        return end_turn[0]
-    if non_trade:
-        return rng.choice(non_trade)
-    return rng.choice(actions)
-
-
 def play(seed: int = DEFAULT_SEED, n_players: int = 4, max_steps: int = 5000) -> GameState:
     pids = [PlayerID(i) for i in range(n_players)]
     cfg = GameConfig(player_ids=pids, seed=seed)
     engine = GameEngine(SeededRandomizer(seed))
     state = engine.new_game(cfg)
-    rng = random.Random(seed)
+    agent = ScriptedAgent(random.Random(seed))
     for step in range(max_steps):
         if state.is_terminal():
             break
@@ -57,7 +45,9 @@ def play(seed: int = DEFAULT_SEED, n_players: int = 4, max_steps: int = 5000) ->
             break
         legals = engine.legal_actions(state)
         assert legals, "non-terminal state must have legal actions after resolve_if_no_legal_actions"
-        action = _pick_action(legals, rng)
+        snap = GameSnapshot(state, step, None, ())
+        action = agent.choose(snap, legals)
+        assert action is not None
         state = engine.apply_action(state, action).state
     return state
 
