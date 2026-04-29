@@ -9,6 +9,7 @@ from domain.engine.randomizer import SeededRandomizer
 from domain.game.config import GameConfig
 from domain.ids import PlayerID
 from controller.session import GameSession, GameSnapshot
+from serialization.codec import encode_state
 from tests.fixtures.states import _first_setup_action
 
 
@@ -17,6 +18,10 @@ def _make_session(seed: int = 0, n_players: int = 3) -> GameSession:
     config = GameConfig(player_ids=pids, seed=seed)
     engine = GameEngine(SeededRandomizer(seed))
     return GameSession(engine, config)
+
+
+def _make_engine(seed: int = 0) -> GameEngine:
+    return GameEngine(SeededRandomizer(seed))
 
 
 def _advance(session: GameSession, steps: int) -> None:
@@ -159,3 +164,75 @@ def test_on_change_not_fired_on_jump() -> None:
     session.on_change = received.append
     session.jump_to(1)
     assert received == []
+
+
+# ---------------------------------------------------------------------------
+# export_replay / from_replay round-trip
+# ---------------------------------------------------------------------------
+
+def test_export_replay_action_count_matches_cursor() -> None:
+    session = _make_session()
+    _advance(session, 5)
+    log = session.export_replay()
+    assert len(log.actions) == 5
+    assert len(log.events) == 5
+
+
+def test_export_replay_cursor_aware() -> None:
+    session = _make_session()
+    _advance(session, 5)
+    session.jump_to(3)
+    log = session.export_replay()
+    assert len(log.actions) == 3
+
+
+def test_from_replay_cursor_at_final_step() -> None:
+    session = _make_session(seed=1)
+    _advance(session, 6)
+    log = session.export_replay()
+    restored = GameSession.from_replay(_make_engine(seed=1), log)
+    assert restored.current().step_index == 6
+
+
+def test_from_replay_history_length() -> None:
+    session = _make_session(seed=2)
+    _advance(session, 4)
+    log = session.export_replay()
+    restored = GameSession.from_replay(_make_engine(seed=2), log)
+    assert len(restored.history()) == 5  # snapshots 0..4
+
+
+def test_round_trip_final_state_matches() -> None:
+    """Play N actions, export_replay, from_replay — final encoded state must match."""
+    seed = 42
+    session = _make_session(seed=seed)
+    _advance(session, 8)
+    original_state = session.current().state
+
+    log = session.export_replay()
+    restored = GameSession.from_replay(_make_engine(seed=seed), log)
+
+    assert encode_state(restored.current().state) == encode_state(original_state)
+
+
+def test_round_trip_preserves_all_snapshots() -> None:
+    seed = 7
+    session = _make_session(seed=seed)
+    _advance(session, 5)
+    log = session.export_replay()
+    restored = GameSession.from_replay(_make_engine(seed=seed), log)
+
+    original_history = session.history()
+    restored_history = restored.history()
+    assert len(original_history) == len(restored_history)
+    for orig, rest in zip(original_history, restored_history):
+        assert encode_state(orig.state) == encode_state(rest.state)
+
+
+def test_from_replay_empty_log() -> None:
+    session = _make_session(seed=0)
+    log = session.export_replay()
+    assert len(log.actions) == 0
+    restored = GameSession.from_replay(_make_engine(seed=0), log)
+    assert restored.current().step_index == 0
+    assert encode_state(restored.current().state) == encode_state(session.current().state)

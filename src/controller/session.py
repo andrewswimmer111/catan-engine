@@ -9,7 +9,7 @@ engine construction, seeding, and teardown in one place.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from domain.actions.base import Action
 from domain.engine.game_engine import GameEngine
@@ -17,6 +17,9 @@ from domain.engine.step_result import StepResult
 from domain.events.base import GameEvent
 from domain.game.config import GameConfig
 from domain.game.state import GameState
+
+if TYPE_CHECKING:
+    from serialization.replay import ReplayLog
 
 
 __all__ = ["GameSnapshot", "GameSession"]
@@ -82,3 +85,59 @@ class GameSession:
 
     def actions_log(self) -> tuple[Action, ...]:
         return tuple(self._actions)
+
+    @classmethod
+    def from_replay(
+        cls,
+        engine: GameEngine,
+        log: "ReplayLog",
+    ) -> "GameSession":
+        """Replay every action; the resulting session has the full history
+        loaded and the cursor at the final step.
+
+        The engine must use the same RNG seed the log was recorded under —
+        passing an engine with a different seed will produce incorrect state
+        because board layout, dev-deck order, and dice rolls are all seeded.
+        """
+        from serialization.codec import decode_action
+
+        session: GameSession = cls.__new__(cls)
+        session._engine = engine
+        session._config = log.config
+        session.on_change = None
+
+        initial_state = engine.new_game(log.config)
+        session._snapshots = [GameSnapshot(initial_state, 0, None, ())]
+        session._actions = []
+        session._cursor = 0
+
+        state = initial_state
+        for i, act_data in enumerate(log.actions):
+            action = decode_action(act_data)
+            result: StepResult = engine.apply_action(state, action)
+            snapshot = GameSnapshot(
+                state=result.state,
+                step_index=i + 1,
+                last_action=action,
+                last_events=tuple(result.events),
+            )
+            session._snapshots.append(snapshot)
+            session._actions.append(action)
+            state = result.state
+
+        session._cursor = len(session._snapshots) - 1
+        return session
+
+    def export_replay(self) -> "ReplayLog":
+        """Build a ReplayLog from the actions applied so far (cursor-aware:
+        only includes actions up to the cursor)."""
+        from serialization.codec import encode_action, encode_event
+        from serialization.replay import ReplayLog
+
+        actions = []
+        events = []
+        for i, action in enumerate(self._actions[: self._cursor]):
+            actions.append(encode_action(action))
+            events.append([encode_event(e) for e in self._snapshots[i + 1].last_events])
+
+        return ReplayLog(config=self._config, actions=actions, events=events)
