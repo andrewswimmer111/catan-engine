@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import random
-from typing import runtime_checkable
-
-import pytest
 
 from controller.agents import Agent, HumanAgent, ScriptedAgent
 from controller.session import GameSession, GameSnapshot
