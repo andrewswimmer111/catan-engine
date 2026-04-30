@@ -18,7 +18,6 @@ def main() -> None:
     config = GameConfig(player_ids=[PlayerID(i) for i in range(4)], seed=2)
     session = GameSession(engine, config)
     win = MainWindow(session)
-    session.on_change = win.refresh
     win.show()
     sys.exit(app.exec())
 

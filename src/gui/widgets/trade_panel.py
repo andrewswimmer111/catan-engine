@@ -52,8 +52,7 @@ class TradePanel(QWidget):
         pending: DomesticTradePending,
         legal: list[Action],
     ) -> QWidget:
-        all_pids = set(snap.state.players.keys())
-        proposer = (all_pids - set(pending.responses.keys())).pop()
+        proposer = snap.state.current_player
 
         body = QWidget()
         layout = QVBoxLayout(body)
