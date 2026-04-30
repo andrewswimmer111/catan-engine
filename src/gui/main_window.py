@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QPushButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import (
 
 import controller.selectors as selectors
 import domain.actions.all_actions as A
+from controller.agents import HumanAgent
+from controller.orchestrator import Orchestrator, make_default_agents, make_scripted_agent
 from controller.session import GameSession, GameSnapshot
 from domain.engine.game_engine import GameEngine
 from domain.engine.player_view import make_player_view
@@ -97,6 +100,9 @@ class MainWindow(QMainWindow):
         self._timeline.jumped.connect(self._on_jumped)
         self._event_log.jumped.connect(self._on_jumped)
 
+        self._agents = make_default_agents(player_ids)
+        self._orchestrator = Orchestrator(session, self._agents)
+
         self._setup_menu()
         self._setup_toolbar(player_ids)
         self._setup_shortcuts()
@@ -123,6 +129,7 @@ class MainWindow(QMainWindow):
     def _setup_toolbar(self, player_ids: list[PlayerID]) -> None:
         toolbar = self.addToolBar("View")
         toolbar.setMovable(False)
+
         toolbar.addWidget(QLabel("View as:  "))
         self._view_combo = QComboBox()
         self._view_combo.addItem("GOD")
@@ -132,6 +139,28 @@ class MainWindow(QMainWindow):
         self._view_combo.currentTextChanged.connect(
             lambda _: self._refresh_player_panels(self._session.current())
         )
+
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("Seats:  "))
+        self._seat_combos: dict[PlayerID, QComboBox] = {}
+        for pid in player_ids:
+            toolbar.addWidget(QLabel(f"P{int(pid)}:"))
+            combo = QComboBox()
+            combo.addItems(["HUMAN", "SCRIPTED"])
+            combo.currentTextChanged.connect(
+                lambda text, p=pid: self._on_seat_changed(p, text)
+            )
+            self._seat_combos[pid] = combo
+            toolbar.addWidget(combo)
+
+        toolbar.addSeparator()
+        step1_btn = QPushButton("Step 1")
+        step1_btn.clicked.connect(self._on_step_once)
+        toolbar.addWidget(step1_btn)
+
+        step_all_btn = QPushButton("Step until Human")
+        step_all_btn.clicked.connect(self._on_step_until_human)
+        toolbar.addWidget(step_all_btn)
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence("Left"), self).activated.connect(self._timeline.step_back)
@@ -167,6 +196,7 @@ class MainWindow(QMainWindow):
         session.on_change = self.refresh
         self._timeline.set_session(session)
         self._event_log.set_session(session)
+        self._orchestrator.set_session(session)
         snap = session.current()
         self.refresh(snap)
 
@@ -223,6 +253,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
+
+    def _on_seat_changed(self, player_id: PlayerID, text: str) -> None:
+        if text == "SCRIPTED":
+            self._orchestrator.set_agent(player_id, make_scripted_agent(player_id))
+        else:
+            self._orchestrator.set_agent(player_id, HumanAgent())
+
+    def _on_step_once(self) -> None:
+        self._orchestrator.step_once()
+
+    def _on_step_until_human(self) -> None:
+        self._orchestrator.run_until_human()
 
     def _on_jumped(self, snap: GameSnapshot) -> None:
         self._update_status(snap)
