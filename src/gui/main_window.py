@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QMainWindow, QMenu
+from PySide6.QtWidgets import QMainWindow, QMenu, QSplitter
 
 import controller.selectors as selectors
 import domain.actions.all_actions as A
 from controller.session import GameSession, GameSnapshot
 from domain.ids import EdgeID, TileID, VertexID
+from gui.widgets.action_panel import ActionPanel
 from gui.widgets.board_canvas import BoardCanvas
 
 
@@ -17,17 +18,27 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Catan Engine")
 
         self._canvas = BoardCanvas(session)
-        self.setCentralWidget(self._canvas)
+        self._panel = ActionPanel()
+
+        splitter = QSplitter()
+        splitter.addWidget(self._canvas)
+        splitter.addWidget(self._panel)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(splitter)
 
         self._canvas.vertex_clicked.connect(self._on_vertex_clicked)
         self._canvas.edge_clicked.connect(self._on_edge_clicked)
         self._canvas.tile_clicked.connect(self._on_tile_clicked)
+        self._panel.action_chosen.connect(self._on_action_chosen)
 
         menu = self.menuBar().addMenu("File")
         menu.addAction("Quit", self.close)
 
         self.statusBar()
-        self._update_status(session.current())
+        snap = session.current()
+        self._update_status(snap)
+        self._panel.refresh(snap, session.legal_actions())
 
     def _update_status(self, snap: GameSnapshot) -> None:
         state = snap.state
@@ -38,6 +49,10 @@ class MainWindow(QMainWindow):
     def refresh(self, snap: GameSnapshot) -> None:
         self._update_status(snap)
         self._canvas.refresh(snap)
+        self._panel.refresh(snap, self._session.legal_actions())
+
+    def _on_action_chosen(self, action: object) -> None:
+        self._session.apply(action)
 
     def _on_vertex_clicked(self, vertex_id_int: int) -> None:
         vid = VertexID(vertex_id_int)
