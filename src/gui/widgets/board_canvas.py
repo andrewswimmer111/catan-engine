@@ -29,10 +29,24 @@ class BoardCanvas(QGraphicsView):
         self._highlighted_vertices: set[VertexID] = set()
         self._highlighted_edges: set[EdgeID] = set()
         self._highlighted_tiles: set[TileID] = set()
-        self._build_static_layer()
-        self._build_overlay_layer()
+        self._build_scene()
         self.refresh(session.current())
         self.fitInView(self._scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+
+    def set_session(self, session: GameSession) -> None:
+        """Rebuild the scene against a new session (e.g. after replay load)."""
+        self._session = session
+        self._scene.clear()
+        self._highlighted_vertices = set()
+        self._highlighted_edges = set()
+        self._highlighted_tiles = set()
+        self._build_scene()
+        self.refresh(session.current())
+        self.fitInView(self._scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+
+    def _build_scene(self) -> None:
+        self._build_static_layer()
+        self._build_overlay_layer()
 
     def _build_static_layer(self) -> None:
         topology = self._session.current().state.topology
@@ -71,22 +85,22 @@ class BoardCanvas(QGraphicsView):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            item = next(iter(self.items(event.pos())), None)
-            while item is not None and not isinstance(item, (VertexItem, EdgeItem, TileItem)):
-                item = item.parentItem()
-
-            if isinstance(item, VertexItem):
-                vid = VertexID(item.data(0))
-                if vid in self._highlighted_vertices:
-                    self.vertex_clicked.emit(int(vid))
-            elif isinstance(item, EdgeItem):
-                eid = EdgeID(item.data(0))
-                if eid in self._highlighted_edges:
-                    self.edge_clicked.emit(int(eid))
-            elif isinstance(item, TileItem):
-                tid = TileID(item.data(0))
-                if tid in self._highlighted_tiles:
-                    self.tile_clicked.emit(int(tid))
+            for candidate in self.items(event.pos()):
+                if isinstance(candidate, VertexItem):
+                    vid = VertexID(candidate.data(0))
+                    if vid in self._highlighted_vertices:
+                        self.vertex_clicked.emit(int(vid))
+                    break
+                if isinstance(candidate, EdgeItem):
+                    eid = EdgeID(candidate.data(0))
+                    if eid in self._highlighted_edges:
+                        self.edge_clicked.emit(int(eid))
+                    break
+                if isinstance(candidate, TileItem):
+                    tid = TileID(candidate.data(0))
+                    if tid in self._highlighted_tiles:
+                        self.tile_clicked.emit(int(tid))
+                    break
         super().mousePressEvent(event)
 
     def refresh(self, snap: GameSnapshot) -> None:
