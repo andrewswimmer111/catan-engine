@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -54,19 +55,24 @@ class ActionPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         btn_box = QGroupBox("Actions")
-        btn_layout = QHBoxLayout(btn_box)
-        btn_layout.setAlignment(Qt.AlignLeft)
+        btn_layout = QVBoxLayout(btn_box)
+        btn_layout.setSpacing(2)
+        btn_layout.setContentsMargins(4, 4, 4, 4)
         self._buttons: dict[type[Action], QPushButton] = {}
         for group_label, group_types in _BUTTON_GROUPS.items():
-            group_box = QGroupBox(group_label)
-            group_inner = QHBoxLayout(group_box)
+            label = QLabel(f"<b>{group_label}</b>")
+            btn_layout.addWidget(label)
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            row.setContentsMargins(0, 0, 0, 0)
             for cls in group_types:
                 btn = QPushButton(_label(cls))
                 btn.setEnabled(False)
                 btn.clicked.connect(lambda checked=False, c=cls: self._on_button(c))
-                group_inner.addWidget(btn)
+                row.addWidget(btn)
                 self._buttons[cls] = btn
-            btn_layout.addWidget(group_box)
+            row.addStretch()
+            btn_layout.addLayout(row)
         layout.addWidget(btn_box)
 
         self._show_raw = QCheckBox("Show raw list")
