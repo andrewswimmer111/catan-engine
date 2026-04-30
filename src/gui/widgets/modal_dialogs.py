@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from domain.actions.all_actions import MaritimeTradeAction, ProposeDomesticTradeAction
 from domain.enums import Resource, tradeable_resources
-from domain.rules.trade_rules import _DOMESTIC_SINGLE_RESOURCE_RATIOS
+from domain.rules.trade_rules import DOMESTIC_SINGLE_RESOURCE_RATIOS
 
 _RESOURCES: list[Resource] = list(tradeable_resources())
 _LABEL: dict[Resource, str] = {r: r.value.capitalize() for r in _RESOURCES}
@@ -156,7 +156,7 @@ class ProposeDomesticTradeDialog(QDialog):
         offer_r = self._offer_combo.currentData()
         held = self._hand.get(offer_r, 0) if offer_r is not None else 0
         self._ratio_combo.clear()
-        for give_count, receive_count in _DOMESTIC_SINGLE_RESOURCE_RATIOS:
+        for give_count, receive_count in DOMESTIC_SINGLE_RESOURCE_RATIOS:
             if held >= give_count:
                 self._ratio_combo.addItem(f"{give_count} : {receive_count}", (give_count, receive_count))
         self._update_ok()

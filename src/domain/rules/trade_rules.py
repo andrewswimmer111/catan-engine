@@ -22,7 +22,7 @@ from domain.turn.pending import DomesticTradePending
 # Single-resource domestic-trade ratios: 1:1, N:1, and 1:N with N capped at 3.
 # Larger or asymmetric multi-resource bundles are intentionally omitted to keep
 # the action space finite; extend when the agent needs richer offers.
-_DOMESTIC_SINGLE_RESOURCE_RATIOS: Final[tuple[tuple[int, int], ...]] = (
+DOMESTIC_SINGLE_RESOURCE_RATIOS: Final[tuple[tuple[int, int], ...]] = (
     (1, 1),
     (2, 1),
     (3, 1),
@@ -151,7 +151,7 @@ def legal_propose_domestic_single_resource(
         for b in tradeable_resources():
             if a == b:
                 continue
-            for give_count, receive_count in _DOMESTIC_SINGLE_RESOURCE_RATIOS:
+            for give_count, receive_count in DOMESTIC_SINGLE_RESOURCE_RATIOS:
                 if held < give_count:
                     continue
                 out.append(
