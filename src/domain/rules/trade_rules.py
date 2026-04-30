@@ -102,7 +102,10 @@ def legal_domestic_turn(state: GameState) -> list[
             for oth in pids:
                 if oth == state.current_player:
                     continue
-                if p.responses.get(oth) is DomesticTradeState.ACCEPTED:
+                if (
+                    p.responses.get(oth) is DomesticTradeState.ACCEPTED
+                    and state.players[oth].can_afford(p.request)
+                ):
                     out.append(
                         ConfirmDomesticTradeAction(
                             player_id=state.current_player, trade_with=oth
@@ -118,11 +121,12 @@ def legal_domestic_turn(state: GameState) -> list[
                         player_id=pid, response=DomesticTradeState.REJECTED
                     )
                 )
-                out.append(
-                    RespondDomesticTradeAction(
-                        player_id=pid, response=DomesticTradeState.ACCEPTED
+                if state.players[pid].can_afford(p.request):
+                    out.append(
+                        RespondDomesticTradeAction(
+                            player_id=pid, response=DomesticTradeState.ACCEPTED
+                        )
                     )
-                )
     return out
 
 
