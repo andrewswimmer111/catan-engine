@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -13,7 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from domain.actions.all_actions import MaritimeTradeAction
+from domain.actions.all_actions import MaritimeTradeAction, ProposeDomesticTradeAction
 from domain.enums import Resource, tradeable_resources
 
 _RESOURCES: list[Resource] = list(tradeable_resources())
@@ -110,6 +112,53 @@ class MonopolyDialog(QDialog):
 
     def chosen(self) -> Resource:
         return self._combo.currentData()
+
+
+class ProposeDomesticTradeDialog(QDialog):
+    """Two resource grids (offer / request) for proposing a domestic trade."""
+
+    def __init__(self, hand: dict[Resource, int] | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Propose Domestic Trade")
+        self.setModal(True)
+
+        self._offer_spins: dict[Resource, QSpinBox] = {}
+        self._request_spins: dict[Resource, QSpinBox] = {}
+
+        outer = QVBoxLayout(self)
+
+        grids = QHBoxLayout()
+        for title, spins, cap in (
+            ("You offer", self._offer_spins, hand),
+            ("You request", self._request_spins, None),
+        ):
+            box = QGroupBox(title)
+            form = QFormLayout(box)
+            for r in _RESOURCES:
+                spin = QSpinBox()
+                spin.setRange(0, cap.get(r, 0) if cap else 19)
+                spin.valueChanged.connect(self._update_ok)
+                form.addRow(_LABEL[r], spin)
+                spins[r] = spin
+            grids.addWidget(box)
+        outer.addLayout(grids)
+
+        self._btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._btns.accepted.connect(self.accept)
+        self._btns.rejected.connect(self.reject)
+        outer.addWidget(self._btns)
+
+        self._update_ok()
+
+    def _update_ok(self) -> None:
+        has_offer = any(s.value() > 0 for s in self._offer_spins.values())
+        has_request = any(s.value() > 0 for s in self._request_spins.values())
+        self._btns.button(QDialogButtonBox.Ok).setEnabled(has_offer and has_request)
+
+    def chosen(self) -> tuple[dict[Resource, int], dict[Resource, int]]:
+        offer = {r: s.value() for r, s in self._offer_spins.items() if s.value() > 0}
+        request = {r: s.value() for r, s in self._request_spins.items() if s.value() > 0}
+        return offer, request
 
 
 class MaritimeTradeDialog(QDialog):

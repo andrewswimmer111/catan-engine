@@ -23,13 +23,14 @@ from gui.widgets.modal_dialogs import (
     DiscardDialog,
     MaritimeTradeDialog,
     MonopolyDialog,
+    ProposeDomesticTradeDialog,
     YearOfPlentyDialog,
 )
 
 _BUTTON_GROUPS: dict[str, tuple[type[Action], ...]] = {
     "Turn": selectors.ACTION_GROUPS["Turn"],
     "Dev Card": selectors.ACTION_GROUPS["DevCard"],
-    "Trade": (A.MaritimeTradeAction,),
+    "Trade": (A.MaritimeTradeAction, A.ProposeDomesticTradeAction),
 }
 
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])")
@@ -109,6 +110,8 @@ class ActionPanel(QWidget):
             self._show_monopoly_dialog()
         elif cls is A.MaritimeTradeAction:
             self._show_maritime_trade_dialog()
+        elif cls is A.ProposeDomesticTradeAction:
+            self._show_propose_trade_dialog()
         else:
             for action in self._legal:
                 if type(action) is cls:
@@ -161,3 +164,13 @@ class ActionPanel(QWidget):
         dlg = MaritimeTradeDialog(trades, parent=self)
         if dlg.exec():
             self.action_chosen.emit(dlg.chosen())
+
+    def _show_propose_trade_dialog(self) -> None:
+        player_id = self._snap.state.current_player
+        hand = self._snap.state.players[player_id].resources
+        dlg = ProposeDomesticTradeDialog(hand=hand, parent=self)
+        if dlg.exec():
+            offer, request = dlg.chosen()
+            self.action_chosen.emit(
+                A.ProposeDomesticTradeAction(player_id=player_id, offer=offer, request=request)
+            )
