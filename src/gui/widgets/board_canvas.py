@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
 
 from controller import selectors
 from controller.session import GameSession, GameSnapshot
 from domain.ids import EdgeID, TileID, VertexID
+from gui import theme
 from gui.geometry import tile_polygon_px, vertex_positions_px
 from gui.items.edge_item import EdgeItem
 from gui.items.port_item import PortItem
@@ -92,10 +94,17 @@ class BoardCanvas(QGraphicsView):
 
         for vid, item in self._vertex_items.items():
             b = occ.building_at(vid)
-            item.set_building(*(b if b else (None, None)))
+            if b:
+                owner, kind = b
+                color = QColor(theme.PLAYER_COLORS[int(owner) % len(theme.PLAYER_COLORS)])
+                item.set_building(color, kind)
+            else:
+                item.set_building(None, None)
 
         for eid, item in self._edge_items.items():
-            item.set_road(occ.road_owner(eid))
+            owner = occ.road_owner(eid)
+            color = QColor(theme.PLAYER_COLORS[int(owner) % len(theme.PLAYER_COLORS)]) if owner is not None else None
+            item.set_road(color)
 
         self._robber.move_to(occ.robber_tile)
 

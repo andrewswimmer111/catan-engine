@@ -4,8 +4,7 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import QGraphicsLineItem
 
-from domain.ids import EdgeID, PlayerID
-from gui import theme
+from domain.ids import EdgeID
 
 _EMPTY_COLOR = "#dddddd"
 _EMPTY_WIDTH = 1
@@ -19,12 +18,12 @@ class EdgeItem(QGraphicsLineItem):
         super().__init__(p1.x(), p1.y(), p2.x(), p2.y())
         self.setData(0, int(edge_id))
         self.setZValue(1)
-        self._owner: PlayerID | None = None
+        self._color: QColor | None = None
         self._highlighted = False
         self._apply()
 
-    def set_road(self, owner: PlayerID | None) -> None:
-        self._owner = owner
+    def set_road(self, color: QColor | None) -> None:
+        self._color = color
         self._apply()
 
     def set_highlight(self, on: bool) -> None:
@@ -32,9 +31,8 @@ class EdgeItem(QGraphicsLineItem):
         self._apply()
 
     def _apply(self) -> None:
-        if self._owner is not None:
-            color = QColor(theme.PLAYER_COLORS[int(self._owner) % len(theme.PLAYER_COLORS)])
-            self.setPen(QPen(color, _ROAD_WIDTH))
+        if self._color is not None:
+            self.setPen(QPen(self._color, _ROAD_WIDTH))
         elif self._highlighted:
             self.setPen(QPen(QColor(_HIGHLIGHT_COLOR), _HIGHLIGHT_WIDTH))
         else:

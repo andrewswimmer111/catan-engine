@@ -4,8 +4,7 @@ from PySide6.QtGui import QBrush, QColor, QPen
 from PySide6.QtWidgets import QGraphicsEllipseItem
 
 from domain.enums import BuildingType
-from domain.ids import PlayerID, VertexID
-from gui import theme
+from domain.ids import VertexID
 
 _RADIUS = 6.0
 _SETTLEMENT_WIDTH = 1
@@ -20,13 +19,13 @@ class VertexItem(QGraphicsEllipseItem):
         super().__init__(cx - _RADIUS, cy - _RADIUS, _RADIUS * 2, _RADIUS * 2)
         self.setData(0, int(vertex_id))
         self.setZValue(2)
-        self._owner: PlayerID | None = None
+        self._color: QColor | None = None
         self._kind: BuildingType | None = None
         self._highlighted = False
         self._apply()
 
-    def set_building(self, owner: PlayerID | None, kind: BuildingType | None) -> None:
-        self._owner = owner
+    def set_building(self, color: QColor | None, kind: BuildingType | None) -> None:
+        self._color = color
         self._kind = kind
         self._apply()
 
@@ -35,17 +34,15 @@ class VertexItem(QGraphicsEllipseItem):
         self._apply()
 
     def _apply(self) -> None:
-        owner, kind = self._owner, self._kind
-        if owner is None:
+        if self._color is None:
             self.setBrush(QBrush(QColor(_EMPTY_COLOR)))
         else:
-            self.setBrush(QBrush(QColor(theme.PLAYER_COLORS[int(owner) % len(theme.PLAYER_COLORS)])))
+            self.setBrush(QBrush(self._color))
 
         if self._highlighted:
             self.setPen(QPen(QColor(_HIGHLIGHT_COLOR), _HIGHLIGHT_WIDTH))
-        elif owner is None:
+        elif self._color is None:
             self.setPen(QPen(QColor(_EMPTY_COLOR), _SETTLEMENT_WIDTH))
         else:
-            color = QColor(theme.PLAYER_COLORS[int(owner) % len(theme.PLAYER_COLORS)])
-            width = _CITY_WIDTH if kind == BuildingType.CITY else _SETTLEMENT_WIDTH
-            self.setPen(QPen(color.darker(150), width))
+            width = _CITY_WIDTH if self._kind == BuildingType.CITY else _SETTLEMENT_WIDTH
+            self.setPen(QPen(self._color.darker(150), width))
