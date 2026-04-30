@@ -6,8 +6,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -17,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from domain.actions.all_actions import MaritimeTradeAction, ProposeDomesticTradeAction
 from domain.enums import Resource, tradeable_resources
+from domain.rules.trade_rules import _DOMESTIC_SINGLE_RESOURCE_RATIOS
 
 _RESOURCES: list[Resource] = list(tradeable_resources())
 _LABEL: dict[Resource, str] = {r: r.value.capitalize() for r in _RESOURCES}
@@ -115,50 +114,70 @@ class MonopolyDialog(QDialog):
 
 
 class ProposeDomesticTradeDialog(QDialog):
-    """Two resource grids (offer / request) for proposing a domestic trade."""
+    """Single-resource offer/request picker for proposing a domestic trade."""
 
     def __init__(self, hand: dict[Resource, int] | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Propose Domestic Trade")
         self.setModal(True)
-
-        self._offer_spins: dict[Resource, QSpinBox] = {}
-        self._request_spins: dict[Resource, QSpinBox] = {}
+        self._hand = hand or {}
 
         outer = QVBoxLayout(self)
+        form = QFormLayout()
 
-        grids = QHBoxLayout()
-        for title, spins, cap in (
-            ("You offer", self._offer_spins, hand),
-            ("You request", self._request_spins, None),
-        ):
-            box = QGroupBox(title)
-            form = QFormLayout(box)
-            for r in _RESOURCES:
-                spin = QSpinBox()
-                spin.setRange(0, cap.get(r, 0) if cap else 19)
-                spin.valueChanged.connect(self._update_ok)
-                form.addRow(_LABEL[r], spin)
-                spins[r] = spin
-            grids.addWidget(box)
-        outer.addLayout(grids)
+        self._offer_combo = QComboBox()
+        for r in _RESOURCES:
+            if self._hand.get(r, 0) > 0:
+                self._offer_combo.addItem(f"{_LABEL[r]}  (have {self._hand[r]})", r)
+        form.addRow("You offer:", self._offer_combo)
+
+        self._request_combo = QComboBox()
+        for r in _RESOURCES:
+            self._request_combo.addItem(_LABEL[r], r)
+        form.addRow("You request:", self._request_combo)
+
+        self._ratio_combo = QComboBox()
+        form.addRow("Ratio (give : get):", self._ratio_combo)
+
+        outer.addLayout(form)
 
         self._btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self._btns.accepted.connect(self.accept)
         self._btns.rejected.connect(self.reject)
         outer.addWidget(self._btns)
 
+        self._offer_combo.currentIndexChanged.connect(self._on_offer_changed)
+        self._request_combo.currentIndexChanged.connect(self._update_ok)
+        self._ratio_combo.currentIndexChanged.connect(self._update_ok)
+
+        self._on_offer_changed()
+
+    def _on_offer_changed(self) -> None:
+        offer_r = self._offer_combo.currentData()
+        held = self._hand.get(offer_r, 0) if offer_r is not None else 0
+        self._ratio_combo.clear()
+        for give_count, receive_count in _DOMESTIC_SINGLE_RESOURCE_RATIOS:
+            if held >= give_count:
+                self._ratio_combo.addItem(f"{give_count} : {receive_count}", (give_count, receive_count))
         self._update_ok()
 
     def _update_ok(self) -> None:
-        has_offer = any(s.value() > 0 for s in self._offer_spins.values())
-        has_request = any(s.value() > 0 for s in self._request_spins.values())
-        self._btns.button(QDialogButtonBox.Ok).setEnabled(has_offer and has_request)
+        offer_r = self._offer_combo.currentData()
+        request_r = self._request_combo.currentData()
+        ratio = self._ratio_combo.currentData()
+        ok = (
+            offer_r is not None
+            and request_r is not None
+            and offer_r is not request_r
+            and ratio is not None
+        )
+        self._btns.button(QDialogButtonBox.Ok).setEnabled(ok)
 
     def chosen(self) -> tuple[dict[Resource, int], dict[Resource, int]]:
-        offer = {r: s.value() for r, s in self._offer_spins.items() if s.value() > 0}
-        request = {r: s.value() for r, s in self._request_spins.items() if s.value() > 0}
-        return offer, request
+        offer_r = self._offer_combo.currentData()
+        request_r = self._request_combo.currentData()
+        give_count, receive_count = self._ratio_combo.currentData()
+        return {offer_r: give_count}, {request_r: receive_count}
 
 
 class MaritimeTradeDialog(QDialog):
