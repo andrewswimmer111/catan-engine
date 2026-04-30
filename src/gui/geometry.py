@@ -27,11 +27,13 @@ def _board_coords() -> tuple[
     return standard_board_coordinates()
 
 
+@lru_cache(maxsize=1)
 def tile_centers_px() -> dict[TileID, QPointF]:
     tile_centers, _ = _board_coords()
     return {tid: _to_screen(x, y) for tid, (x, y) in tile_centers.items()}
 
 
+@lru_cache(maxsize=1)
 def vertex_positions_px() -> dict[VertexID, QPointF]:
     _, vertex_coords = _board_coords()
     return {vid: _to_screen(x, y) for vid, (x, y) in vertex_coords.items()}
@@ -44,16 +46,19 @@ def edge_midpoint_px(topology: BoardTopology, edge_id: EdgeID) -> QPointF:
     return QPointF((p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2)
 
 
-def tile_polygon_px(tile_id: TileID) -> QPolygonF:
-    """6-corner pointy-top hex polygon in screen pixel space."""
-    center = tile_centers_px()[tile_id]
-    size = _HEX_SIZE * PIXELS_PER_UNIT
+def hex_polygon_px(center: QPointF, radius: float) -> QPolygonF:
+    """Pointy-top hex polygon centered at ``center`` with corner radius ``radius``."""
     points: list[QPointF] = []
     for i in range(6):
         angle = math.pi / 6 + math.pi / 3 * i
         # cos is x (same direction), sin negated for y-down screen space
         points.append(QPointF(
-            center.x() + size * math.cos(angle),
-            center.y() - size * math.sin(angle),
+            center.x() + radius * math.cos(angle),
+            center.y() - radius * math.sin(angle),
         ))
     return QPolygonF(points)
+
+
+def tile_polygon_px(tile_id: TileID) -> QPolygonF:
+    """6-corner pointy-top hex polygon for a board tile in screen pixel space."""
+    return hex_polygon_px(tile_centers_px()[tile_id], _HEX_SIZE * PIXELS_PER_UNIT)
