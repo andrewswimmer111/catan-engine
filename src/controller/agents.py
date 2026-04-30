@@ -15,7 +15,15 @@ from controller.session import GameSnapshot
 from domain.actions import all_actions as A
 from domain.actions.base import Action
 
-__all__ = ["Agent", "HumanAgent", "ScriptedAgent"]
+from domain.ids import PlayerID
+
+__all__ = [
+    "Agent",
+    "HumanAgent",
+    "ScriptedAgent",
+    "make_default_agents",
+    "make_scripted_agent",
+]
 
 
 class Agent(Protocol):
@@ -41,3 +49,12 @@ class ScriptedAgent:
         if non_trade:
             return self._rng.choice(non_trade)
         return self._rng.choice(legal)
+
+
+def make_default_agents(player_ids: list[PlayerID]) -> dict[PlayerID, "Agent"]:
+    """All seats start as HumanAgent."""
+    return {pid: HumanAgent() for pid in player_ids}
+
+
+def make_scripted_agent(player_id: PlayerID) -> ScriptedAgent:
+    return ScriptedAgent(random.Random(int(player_id)))

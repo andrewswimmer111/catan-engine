@@ -17,13 +17,12 @@ from PySide6.QtWidgets import (
 
 import controller.selectors as selectors
 import domain.actions.all_actions as A
-from controller.agents import HumanAgent
-from controller.orchestrator import Orchestrator, make_default_agents, make_scripted_agent
+from controller.agents import HumanAgent, make_default_agents, make_scripted_agent
+from controller.orchestrator import Orchestrator
 from controller.session import GameSession, GameSnapshot
 from domain.engine.game_engine import GameEngine
 from domain.engine.player_view import make_player_view
 from domain.engine.randomizer import SeededRandomizer
-from domain.game.state import GameState
 from domain.ids import EdgeID, PlayerID, TileID, VertexID
 from gui.widgets.action_panel import ActionPanel
 from gui.widgets.board_canvas import BoardCanvas
@@ -38,6 +37,7 @@ class MainWindow(QMainWindow):
     def __init__(self, session: GameSession) -> None:
         super().__init__()
         self._session = session
+        session.on_change = self.refresh
         self.setWindowTitle("Catan Engine")
 
         self._canvas = BoardCanvas(session)
@@ -108,12 +108,7 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
 
         self.statusBar()
-        snap = session.current()
-        legal = session.legal_actions()
-        self._update_status(snap)
-        self._panel.refresh(snap, legal)
-        self._trade.refresh(snap, legal)
-        self._refresh_player_panels(snap)
+        self._render(session.current())
 
     # ------------------------------------------------------------------
     # Menu, toolbar & shortcuts
@@ -192,22 +187,16 @@ class MainWindow(QMainWindow):
 
     def _replace_session(self, session: GameSession) -> None:
         self._session = session
-        self._canvas._session = session
         session.on_change = self.refresh
+        self._canvas.set_session(session)
         self._timeline.set_session(session)
         self._event_log.set_session(session)
         self._orchestrator.set_session(session)
-        snap = session.current()
-        self.refresh(snap)
+        self._render(session.current())
 
     # ------------------------------------------------------------------
     # State helpers
     # ------------------------------------------------------------------
-
-    def _prev_state(self, snap: GameSnapshot) -> GameState | None:
-        if snap.step_index == 0:
-            return None
-        return self._session.history()[snap.step_index - 1].state
 
     def _update_status(self, snap: GameSnapshot) -> None:
         state = snap.state
@@ -240,15 +229,19 @@ class MainWindow(QMainWindow):
     # Public refresh (called by session.on_change after apply())
     # ------------------------------------------------------------------
 
-    def refresh(self, snap: GameSnapshot) -> None:
+    def _render(self, snap: GameSnapshot) -> None:
+        """Sync every widget except the event log against ``snap``."""
         self._update_status(snap)
         legal = self._session.legal_actions()
         self._canvas.refresh(snap)
         self._panel.refresh(snap, legal)
         self._trade.refresh(snap, legal)
         self._timeline.refresh(snap)
-        self._event_log.on_applied(snap)
         self._refresh_player_panels(snap)
+
+    def refresh(self, snap: GameSnapshot) -> None:
+        self._render(snap)
+        self._event_log.on_applied(snap)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -267,15 +260,7 @@ class MainWindow(QMainWindow):
         self._orchestrator.run_until_human()
 
     def _on_jumped(self, snap: GameSnapshot) -> None:
-        self._update_status(snap)
-        legal = self._session.legal_actions()
-        self._canvas.refresh(snap)
-        self._panel.refresh(snap, legal)
-        self._trade.refresh(snap, legal)
-        self._timeline.refresh(snap)
-        self._refresh_player_panels(snap)
-        if snap.step_index == 0:
-            self._event_log.rebuild()
+        self._render(snap)
 
     def _on_action_chosen(self, action: object) -> None:
         self._session.apply(action)

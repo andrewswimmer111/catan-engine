@@ -1,15 +1,20 @@
+"""
+Drives non-human turns on demand.
+
+Sits between the GUI (which steps on user gestures or wall-clock) and the
+session: looks up the active player's :class:`~controller.agents.Agent`, asks
+it to pick a legal action, and applies it. Human seats cause ``step_once`` to
+return ``False`` so the GUI can fall back to direct user input.
+"""
+
 from __future__ import annotations
 
-import random
-
-from controller.agents import Agent, HumanAgent, ScriptedAgent
+from controller.agents import Agent
 from controller.session import GameSession
 from domain.ids import PlayerID
 
 
 class Orchestrator:
-    """Drives non-human turns on demand without owning a Qt timer."""
-
     def __init__(self, session: GameSession, agents: dict[PlayerID, Agent]) -> None:
         self._session = session
         self._agents = agents
@@ -51,12 +56,3 @@ class Orchestrator:
                 break
             steps += 1
         return steps
-
-
-def make_default_agents(player_ids: list[PlayerID]) -> dict[PlayerID, Agent]:
-    """All seats start as HumanAgent."""
-    return {pid: HumanAgent() for pid in player_ids}
-
-
-def make_scripted_agent(player_id: PlayerID) -> ScriptedAgent:
-    return ScriptedAgent(random.Random(int(player_id)))
