@@ -19,7 +19,8 @@ __all__ = ["Agent", "HumanAgent", "ScriptedAgent"]
 
 
 class Agent(Protocol):
-    def choose(self, snap: GameSnapshot, legal: list[Action]) -> Action | None: ...
+    def choose(self, snap: GameSnapshot, legal: list[Action]) -> Action | None:
+        ...
 
 
 class HumanAgent:

@@ -8,7 +8,8 @@ that both agent policies and UI helpers can compose without duplicating logic.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections import defaultdict
+from typing import Callable, TypeVar
 
 import domain.actions.all_actions as A
 from domain.actions.base import Action
@@ -55,29 +56,26 @@ ACTION_GROUPS: dict[str, tuple[type[Action], ...]] = {
     ),
 }
 
+T = TypeVar("T")
+
+def _targets_by_type(
+    legal: list[Action],
+    action_types: tuple[type[Action], ...],
+    get_id: Callable[[Action], T],) -> dict[type[Action], set[T]]:
+    """For each _ action class, the set of legal target _ IDs."""
+
+    result: dict[type[Action], set[T]] = defaultdict(set)
+    for action in legal:
+        if isinstance(action, action_types):
+            result[type(action)].add(get_id(action))
+    return dict(result)
 
 def vertex_targets(legal: list[Action]) -> dict[type[Action], set[VertexID]]:
-    """For each vertex-targeted action class, the set of legal target vertex IDs."""
-    result: dict[type[Action], set[VertexID]] = {}
-    for action in legal:
-        if isinstance(action, _VERTEX_ACTION_TYPES):
-            cls = type(action)
-            if cls not in result:
-                result[cls] = set()
-            result[cls].add(action.vertex_id)
-    return result
+    return _targets_by_type(legal, _VERTEX_ACTION_TYPES, lambda a: a.vertex_id)
 
 
 def edge_targets(legal: list[Action]) -> dict[type[Action], set[EdgeID]]:
-    """For each edge-targeted action class, the set of legal target edge IDs."""
-    result: dict[type[Action], set[EdgeID]] = {}
-    for action in legal:
-        if isinstance(action, _EDGE_ACTION_TYPES):
-            cls = type(action)
-            if cls not in result:
-                result[cls] = set()
-            result[cls].add(action.edge_id)
-    return result
+    return _targets_by_type(legal, _EDGE_ACTION_TYPES, lambda a: a.edge_id)
 
 
 def tile_targets(legal: list[Action]) -> set[TileID]:
