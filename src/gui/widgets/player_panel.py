@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
 
 from domain.engine.player_view import PlayerPerspectiveState
 from domain.game.player_state import PlayerState
+from gui import theme
 
 _RES_ABBR: dict[str, str] = {
     "WOOD": "Wd", "BRICK": "Br", "SHEEP": "Sh",
@@ -49,8 +50,11 @@ class PlayerPanel(QFrame):
         super().__init__()
         self.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
 
+        color = theme.PLAYER_COLORS[player_id % len(theme.PLAYER_COLORS)]
+        self.setStyleSheet(f"QFrame {{ border-left: 4px solid {color}; }}")
+
         self._header = QLabel(f"P{player_id}")
-        self._header.setStyleSheet("font-weight: bold;")
+        self._header.setStyleSheet(f"font-weight: bold; color: {color};")
         self._res_label = QLabel()
         self._res_label.setWordWrap(True)
         self._dev_label = QLabel()
