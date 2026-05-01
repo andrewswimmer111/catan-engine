@@ -25,7 +25,8 @@ def test_after_one_settlement_distance_rule_excludes_banned_vertices() -> None:
     s = copy.deepcopy(s)
     s.occupancy.buildings[v_place] = (PlayerID(0), BuildingType.SETTLEMENT)
     s.current_player = PlayerID(1)
-    blocked = {v_place} | set(s.topology.vertices_within_distance_two(v_place))
+    adjacent = s.topology.vertices[v_place].adjacent_vertices
+    blocked = {v_place} | set(adjacent)
     leg = legal_actions(s)
     allowed = {a.vertex_id for a in leg if isinstance(a, A.PlaceSettlementAction)}
     assert blocked.isdisjoint(allowed)

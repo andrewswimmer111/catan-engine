@@ -48,8 +48,8 @@ def _settlement_distance_ok(state: GameState, vertex_id: VertexID) -> bool:
     occ = state.occupancy
     if vertex_id in occ.buildings:
         return False
-    blocked = state.topology.vertices_within_distance_two(vertex_id)
-    return not any(bv in occ.buildings for bv in blocked)
+    adjacent = state.topology.vertices[vertex_id].adjacent_vertices
+    return not any(bv in occ.buildings for bv in adjacent)
 
 
 def _road_reaches_network(

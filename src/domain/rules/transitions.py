@@ -45,7 +45,7 @@ from domain.turn.pending import (
 # Post-action bookkeeping (awards + winner check)
 # ----------------------------------------------------------------------
 
-VP_STALL_TURN_THRESHOLD = 200
+VP_STALL_TURN_THRESHOLD = 1000
 
 
 def _all_players_at_full_build_expansion(state: GameState) -> bool:

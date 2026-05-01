@@ -16,21 +16,17 @@ def _n_players(state: GameState) -> int:
 
 
 def legal_setup_settlements(state: GameState) -> list[PlaceSettlementAction]:
-    """
-    Legal settlement vertices: empty, and no building on any vertex in
-    :meth:`BoardTopology.vertices_within_distance_two` (per engine contract).
-    """
+    """Legal settlement vertices: empty, and no building on any adjacent vertex."""
     if state.phase is not TurnPhase.INITIAL_SETTLEMENT:
         return []
     occ = state.occupancy
     topo = state.topology
     pid = state.current_player
     out: list[PlaceSettlementAction] = []
-    for vid, _v in topo.vertices.items():
+    for vid, v in topo.vertices.items():
         if vid in occ.buildings:
             continue
-        blocked = topo.vertices_within_distance_two(vid)
-        if any(bv in occ.buildings for bv in blocked):
+        if any(bv in occ.buildings for bv in v.adjacent_vertices):
             continue
         out.append(PlaceSettlementAction(player_id=pid, vertex_id=vid))
     return out

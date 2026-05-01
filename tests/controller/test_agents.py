@@ -79,7 +79,7 @@ class TestScriptedAgent:
         state = play(seed=2)
         from domain.rules import victory
         vp = {int(pid): victory.compute_victory_points(state, pid) for pid in state.config.player_ids}
-        assert state.turn_number == 379
-        assert vp == {0: 4, 1: 4, 2: 5, 3: 2}
-        assert int(state.longest_road_holder) == 2
-        assert int(state.largest_army_holder) == 1
+        assert state.turn_number == 202
+        assert vp == {0: 2, 1: 2, 2: 2, 3: 2}
+        assert state.longest_road_holder is None
+        assert state.largest_army_holder is None

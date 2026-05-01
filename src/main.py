@@ -28,7 +28,7 @@ from domain.game.state import GameState
 from domain.ids import PlayerID
 from domain.rules import victory
 
-DEFAULT_SEED = 2
+DEFAULT_SEED = 1
 
 
 def play(seed: int = DEFAULT_SEED, n_players: int = 4, max_steps: int = 5000) -> GameState:
