@@ -100,6 +100,17 @@ def _maybe_stalemate(s: GameState, ev: list[GameEvent]) -> None:
         )
 
 
+def _sync_public_vp(s: GameState) -> None:
+    """Recompute victory_points_public for every player from authoritative state."""
+    for pid, p in s.players.items():
+        p.victory_points_public = (
+            p.settlements_built
+            + 2 * p.cities_built
+            + (2 if s.longest_road_holder == pid else 0)
+            + (2 if s.largest_army_holder == pid else 0)
+        )
+
+
 def _post_action(s: GameState, ev: list[GameEvent]) -> None:
     """Recompute special awards and end the game if the current player has won."""
     _, lrc = lr_mod.update_longest_road_award(s)
@@ -120,6 +131,7 @@ def _post_action(s: GameState, ev: list[GameEvent]) -> None:
                 count=s.players[s.largest_army_holder].knights_played,
             )
         )
+    _sync_public_vp(s)
     w = victory.check_winner(s)
     if w is not None:
         s.winner = w

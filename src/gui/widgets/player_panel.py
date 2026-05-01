@@ -18,9 +18,9 @@ _DEV_ABBR: dict[str, str] = {
 }
 
 
-def _awards_str(longest_road: bool, largest_army: bool) -> str:
-    tags = (["[LR]"] if longest_road else []) + (["[LA]"] if largest_army else [])
-    return ("  " + " ".join(tags)) if tags else ""
+def _awards_row(longest_road: bool, largest_army: bool) -> str:
+    tags = (["Longest Road"] if longest_road else []) + (["Largest Army"] if largest_army else [])
+    return "Awards: " + ", ".join(tags) if tags else ""
 
 
 def _fmt_res_full(resources: dict) -> str:
@@ -39,10 +39,7 @@ def _fmt_dev_list(cards: list) -> str:
 
 
 def _fmt_stats(vp: int, knights: int, roads: int, settlements: int, cities: int) -> str:
-    return (
-        f"VP:{vp}  Kn:{knights}"
-        f"  Rds:{roads}  Stl:{settlements}  Cty:{cities}"
-    )
+    return f"VP:{vp}  Kn:{knights}  Rds:{roads}  Stl:{settlements}  Cty:{cities}"
 
 
 class PlayerPanel(QFrame):
@@ -60,6 +57,9 @@ class PlayerPanel(QFrame):
         self._dev_label = QLabel()
         self._dev_label.setWordWrap(True)
         self._stats_label = QLabel()
+        self._awards_label = QLabel()
+        self._awards_label.setStyleSheet("color: gold; font-weight: bold;")
+        self._awards_label.setVisible(False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -68,6 +68,7 @@ class PlayerPanel(QFrame):
         layout.addWidget(self._res_label)
         layout.addWidget(self._dev_label)
         layout.addWidget(self._stats_label)
+        layout.addWidget(self._awards_label)
 
     def render_full(
         self,
@@ -76,7 +77,7 @@ class PlayerPanel(QFrame):
         longest_road: bool = False,
         largest_army: bool = False,
     ) -> None:
-        self._header.setText(f"P{int(ps.player_id)}{_awards_str(longest_road, largest_army)}")
+        self._header.setText(f"P{int(ps.player_id)}")
         self._res_label.setText("Res: " + _fmt_res_full(ps.resources))
         self._dev_label.setText("Dev: " + _fmt_dev_list(ps.dev_cards_in_hand))
         self._stats_label.setText(
@@ -85,6 +86,9 @@ class PlayerPanel(QFrame):
                 ps.roads_built, ps.settlements_built, ps.cities_built,
             )
         )
+        awards = _awards_row(longest_road, largest_army)
+        self._awards_label.setText(awards)
+        self._awards_label.setVisible(bool(awards))
 
     def render_perspective(
         self,
@@ -93,7 +97,7 @@ class PlayerPanel(QFrame):
         longest_road: bool = False,
         largest_army: bool = False,
     ) -> None:
-        self._header.setText(f"P{int(row.player_id)}{_awards_str(longest_road, largest_army)}")
+        self._header.setText(f"P{int(row.player_id)}")
 
         if isinstance(row.dev_cards_in_hand, list):
             # This is the viewer's own row — show full detail
@@ -111,3 +115,6 @@ class PlayerPanel(QFrame):
                 row.roads_built, row.settlements_built, row.cities_built,
             )
         )
+        awards = _awards_row(longest_road, largest_army)
+        self._awards_label.setText(awards)
+        self._awards_label.setVisible(bool(awards))
