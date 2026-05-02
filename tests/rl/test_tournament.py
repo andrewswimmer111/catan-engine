@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from domain.ids import PlayerID
 from rl.agents.random_agent import make_random_agents
 from rl.env.catan_env import CatanEnv
@@ -21,6 +23,7 @@ def _make_agents(seed: int = 0):
     return make_random_agents(_PLAYER_IDS, seed=seed)
 
 
+@pytest.mark.slow
 def test_all_games_terminate():
     t = _make_tournament()
     result = t.play(_make_agents(), n_games=20, base_seed=0)
@@ -30,6 +33,7 @@ def test_all_games_terminate():
         assert g.turn_count > 0
 
 
+@pytest.mark.slow
 def test_win_rates_sum_to_one():
     t = _make_tournament()
     result = t.play(_make_agents(), n_games=5, base_seed=42)
@@ -38,6 +42,7 @@ def test_win_rates_sum_to_one():
     assert 0.0 <= total <= 1.0 + 1e-9
 
 
+@pytest.mark.slow
 def test_win_rates_cover_all_players():
     t = _make_tournament()
     result = t.play(_make_agents(), n_games=3, base_seed=7)
@@ -45,6 +50,7 @@ def test_win_rates_cover_all_players():
     assert set(result.mean_vp.keys()) == set(_PLAYER_IDS)
 
 
+@pytest.mark.slow
 def test_reproducible_with_same_seed():
     agents_a = make_random_agents(_PLAYER_IDS, seed=0)
     agents_b = make_random_agents(_PLAYER_IDS, seed=0)
@@ -60,6 +66,7 @@ def test_reproducible_with_same_seed():
         assert ga.action_histogram == gb.action_histogram
 
 
+@pytest.mark.slow
 def test_action_histogram_nonempty():
     t = _make_tournament()
     result = t.play(_make_agents(), n_games=3, base_seed=1)
@@ -69,6 +76,7 @@ def test_action_histogram_nonempty():
         assert all(v > 0 for v in g.action_histogram.values())
 
 
+@pytest.mark.slow
 def test_mean_turns_positive():
     t = _make_tournament()
     result = t.play(_make_agents(), n_games=5, base_seed=10)

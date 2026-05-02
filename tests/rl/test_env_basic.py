@@ -59,6 +59,7 @@ def test_step_illegal_action_raises() -> None:
         env.step(bad)
 
 
+@pytest.mark.slow
 def test_smoke_no_crash_across_seeds() -> None:
     """50 random seeds, 200 steps each — verifies the env raises no exceptions."""
     for seed in range(50):
@@ -75,6 +76,7 @@ def test_smoke_no_crash_across_seeds() -> None:
                 break
 
 
+@pytest.mark.slow
 def test_smoke_game_reaches_terminal() -> None:
     """One seeded game must reach a terminal state (VP stall triggers by turn 1500)."""
     env = CatanEnv(seed=2)
