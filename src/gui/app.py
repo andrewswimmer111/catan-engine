@@ -14,7 +14,7 @@ from gui.main_window import MainWindow
 
 def main() -> None:
     app = QApplication(sys.argv)
-    engine = GameEngine(SeededRandomizer(seed=2))
+    engine = GameEngine(SeededRandomizer(seed=0))
     config = GameConfig(player_ids=[PlayerID(i) for i in range(4)], seed=2)
     session = GameSession(engine, config)
     win = MainWindow(session)
