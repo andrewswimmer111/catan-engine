@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from domain.engine.game_engine import IllegalActionError
-from domain.engine.player_view import PlayerView
 from domain.enums import TurnPhase
 from rl.agents.random_agent import make_random_agents
+from rl.encoding.observation import OBS_SHAPE
 from rl.env.catan_env import CatanEnv
 
 
@@ -20,12 +21,14 @@ def _play_setup(env: CatanEnv) -> None:
             return
 
 
-def test_reset_returns_player_view_in_initial_settlement() -> None:
+def test_reset_returns_encoded_obs_in_initial_settlement() -> None:
     env = CatanEnv(seed=0)
     obs, info = env.reset()
-    assert isinstance(obs, PlayerView)
+    assert isinstance(obs, np.ndarray)
+    assert obs.shape == OBS_SHAPE
+    assert obs.dtype == np.float32
     assert env.state.phase == TurnPhase.INITIAL_SETTLEMENT
-    assert info["current_phase"] == TurnPhase.INITIAL_SETTLEMENT
+    assert info["phase"] == TurnPhase.INITIAL_SETTLEMENT
 
 
 def test_step_legal_action_advances_turn_number() -> None:
