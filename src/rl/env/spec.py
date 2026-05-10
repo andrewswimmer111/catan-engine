@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypedDict
 
-from domain.engine.player_view import PlayerView
+import numpy as np
+
 from domain.enums import TurnPhase
 from domain.ids import PlayerID
 
@@ -10,8 +11,8 @@ if TYPE_CHECKING:
     from domain.actions.base import Action
     from domain.events.base import GameEvent
 
-# The raw observation type returned by CatanEnv (no tensor encoding yet).
-Observation = PlayerView
+# The encoded observation type returned by CatanEnv (rl-007 onwards).
+Observation = np.ndarray
 
 __all__ = ["Observation", "Info"]
 
@@ -20,6 +21,7 @@ class Info(TypedDict):
     """Step metadata returned alongside each observation."""
 
     current_agent: PlayerID
+    action_mask: np.ndarray
     legal_actions: list[Action]
     last_events: list[GameEvent]
-    current_phase: TurnPhase
+    phase: TurnPhase
