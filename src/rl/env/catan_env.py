@@ -34,6 +34,7 @@ from domain.ids import PlayerID
 from domain.turn.pending import DiscardPending
 from rl.encoding.action import ActionEncoder, DiscardSentinel
 from rl.encoding.observation import FlatObservationEncoder
+from rl.env.rewards import RewardFn, SparseWinReward
 from rl.env.spec import Info
 
 __all__ = ["CatanEnv", "IllegalActionError"]
@@ -56,6 +57,7 @@ class CatanEnv:
         seed: int | None = None,
         obs_encoder: FlatObservationEncoder | None = None,
         action_encoder: ActionEncoder | None = None,
+        reward_fn: RewardFn | None = None,
     ) -> None:
         self._base_config = config
         self._seed: int = seed if seed is not None else 0
@@ -73,6 +75,7 @@ class CatanEnv:
             action_encoder if action_encoder is not None
             else ActionEncoder.for_state(self._state)
         )
+        self._reward_fn: RewardFn = reward_fn if reward_fn is not None else SparseWinReward()
 
         # Legal actions are computed once per step boundary and reused for the
         # mask, info["legal_actions"], and any int → Action decoding. Cleared
@@ -97,11 +100,17 @@ class CatanEnv:
 
     def step(self, action: ActionInput) -> tuple[np.ndarray, float, bool, Info]:
         typed_action = self._resolve_action(action)
-        result = self._engine.apply_action(self._state, typed_action)
+        # Capture decision context BEFORE the engine swaps in a new state. The
+        # acting agent is the env's current_agent at step entry — for DISCARD,
+        # that's the player who actually owes the discard, not the dice-roller.
+        acting_agent = self.current_agent
+        prev_state = self._state
+        result = self._engine.apply_action(prev_state, typed_action)
+        reward = float(self._reward_fn.step_reward(prev_state, typed_action, result, acting_agent))
         self._state = result.state
         self._last_events = list(result.events)
         self._legal_cache = None
-        return self._encode_obs(), 0.0, result.is_terminal, self._info()
+        return self._encode_obs(), reward, result.is_terminal, self._info()
 
     # ------------------------------------------------------------------
     # Accessors
@@ -144,6 +153,10 @@ class CatanEnv:
     @property
     def action_encoder(self) -> ActionEncoder:
         return self._action_encoder
+
+    @property
+    def reward_fn(self) -> RewardFn:
+        return self._reward_fn
 
     # ------------------------------------------------------------------
     # Internal helpers
