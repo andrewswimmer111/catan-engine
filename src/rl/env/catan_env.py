@@ -32,6 +32,7 @@ from domain.game.config import GameConfig
 from domain.game.state import GameState
 from domain.ids import PlayerID
 from domain.turn.pending import DiscardPending
+from rl.agents.heuristic_agent import heuristic_discard
 from rl.encoding.action import ActionEncoder, DiscardSentinel
 from rl.encoding.observation import FlatObservationEncoder
 from rl.env.rewards import RewardFn, SparseWinReward
@@ -200,19 +201,5 @@ class CatanEnv:
     def _resolve_discard_sentinel(
         self, sentinel: DiscardSentinel
     ) -> DiscardResourcesAction:
-        """Placeholder discard policy — pick the first matching legal discard.
-
-        Replaced by a proper heuristic in rl-009. Raises ``IllegalActionError``
-        if no matching discard is legal (e.g. discard idx fired outside the
-        DISCARD phase).
-        """
-        for a in self.legal_actions():
-            if (
-                isinstance(a, DiscardResourcesAction)
-                and a.player_id == sentinel.player_id
-            ):
-                return a
-        raise IllegalActionError(
-            f"discard sentinel for player {sentinel.player_id} has no matching "
-            f"legal DiscardResourcesAction in the current state"
-        )
+        """Delegate to the heuristic discard policy (see rl-009)."""
+        return heuristic_discard(self._state, sentinel.player_id)
