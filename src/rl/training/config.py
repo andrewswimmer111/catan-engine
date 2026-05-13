@@ -57,5 +57,40 @@ class TrainConfig:
     seed: int = 0
 
 
-DEFAULT_BASELINE_CONFIG: TrainConfig = TrainConfig()
-"""Placeholder for the tuned baseline (filled in rl-015)."""
+DEFAULT_BASELINE_CONFIG: TrainConfig = TrainConfig(
+    ppo=PPOConfig(
+        lr=3e-4,
+        clip_range=0.2,
+        value_coef=0.5,
+        entropy_coef=0.01,
+        max_grad_norm=0.5,
+        n_epochs=4,
+        minibatch_size=256,
+        target_kl=0.02,
+    ),
+    rollout_steps=2048,
+    gamma=0.99,
+    gae_lambda=0.95,
+    hidden_sizes=(512, 512, 512),
+    eval_every=50_000,
+    eval_n_games=30,
+    checkpoint_every=100_000,
+    log_every=1,
+    seed=0,
+)
+"""Starting-point baseline for the rl-015 convergence sweep.
+
+These are reasonable defaults borrowed from CleanRL-style PPO recipes
+adapted for the Catan domain (large discrete action space, long
+episodes, sparse terminal reward). They have **not** been swept against
+the rl-015 grid yet; revise once empirical results are in.
+
+Sweep grid from the rl-015 plan:
+
+* ``lr`` ∈ {1e-4, 3e-4, 1e-3}
+* ``entropy_coef`` ∈ {0.001, 0.01, 0.05}
+* ``clip_range`` ∈ {0.1, 0.2}
+* ``hidden_sizes`` ∈ {(256, 256), (512, 512, 512)}
+
+Pick the config with the highest win rate vs random at 10M steps.
+"""
