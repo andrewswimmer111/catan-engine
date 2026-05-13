@@ -32,7 +32,14 @@ __all__ = ["RewardFn", "SparseWinReward", "ShapedReward"]
 
 
 class RewardFn(Protocol):
-    """Compute the per-step reward for ``agent`` after ``action`` was applied."""
+    """Compute the per-step reward for ``agent`` after ``action`` was applied.
+
+    ``step_reward`` runs at every env step and only credits the seat that
+    just acted. ``terminal_rewards`` runs once per terminated game and
+    returns the reward each *other* seat should have received at the
+    terminal step — the rollout worker writes these retroactively onto
+    each seat's last transition so PPO sees the multi-agent loss signal.
+    """
 
     def step_reward(
         self,
@@ -41,6 +48,8 @@ class RewardFn(Protocol):
         result: StepResult,
         agent: PlayerID,
     ) -> float: ...
+
+    def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]: ...
 
 
 def _is_stalemate(result: StepResult) -> bool:
@@ -81,6 +90,15 @@ class SparseWinReward:
         if result.winner is None:  # stalemate
             return 0.0
         return 1.0 if result.winner == agent else -1.0
+
+    def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]:
+        winner = final_state.winner
+        if winner is None:
+            return {pid: 0.0 for pid in final_state.config.player_ids}
+        return {
+            pid: (1.0 if pid == winner else -1.0)
+            for pid in final_state.config.player_ids
+        }
 
 
 class ShapedReward:
@@ -129,3 +147,12 @@ class ShapedReward:
         if result.winner == agent:
             return shaped + self.win_bonus
         return shaped - self.win_bonus
+
+    def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]:
+        winner = final_state.winner
+        if winner is None:
+            return {pid: 0.0 for pid in final_state.config.player_ids}
+        return {
+            pid: (self.win_bonus if pid == winner else -self.win_bonus)
+            for pid in final_state.config.player_ids
+        }
