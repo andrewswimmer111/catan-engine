@@ -8,8 +8,6 @@ typed legal-actions list, the last events, and the phase.
 typed :class:`Action`. The dual API exists so neural-net agents can drive the
 env from masked categorical samples while heuristic / scripted agents (and
 the existing tournament harness) keep passing typed actions through.
-
-Reward stays hard-coded at 0.0 until rl-008.
 """
 
 from __future__ import annotations
@@ -26,12 +24,11 @@ from domain.engine.game_engine import (
 )
 from domain.engine.player_view import PlayerView
 from domain.engine.randomizer import SeededRandomizer
-from domain.enums import TurnPhase
 from domain.events.base import GameEvent
 from domain.game.config import GameConfig
 from domain.game.state import GameState
 from domain.ids import PlayerID
-from domain.turn.pending import DiscardPending
+from rl.acting_player import acting_player
 from rl.agents.heuristic_agent import heuristic_discard
 from rl.encoding.action import ActionEncoder, DiscardSentinel
 from rl.encoding.observation import FlatObservationEncoder
@@ -119,18 +116,8 @@ class CatanEnv:
 
     @property
     def current_agent(self) -> PlayerID:
-        """Player expected to act next.
-
-        In DISCARD phase several players may owe discards; returns the first
-        player still listed in DiscardPending rather than the dice-roller
-        (state.current_player), so callers can dispatch to the correct agent.
-        """
-        if (
-            self._state.phase == TurnPhase.DISCARD
-            and isinstance(self._state.pending, DiscardPending)
-        ):
-            return next(iter(self._state.pending.cards_to_discard))
-        return self._state.current_player
+        """Player expected to act next (see :func:`rl.acting_player.acting_player`)."""
+        return acting_player(self._state)
 
     def legal_actions(self) -> list[Action]:
         """Typed legal-action list for the current state, cached per step."""
@@ -182,10 +169,9 @@ class CatanEnv:
         """Coerce an int index or typed Action into the typed Action the engine wants.
 
         Discards: when an integer index decodes to a :class:`DiscardSentinel`,
-        we resolve it against the currently-cached legal actions by picking
-        the first :class:`DiscardResourcesAction` for the owing player. This
-        is a placeholder until the rl-009 heuristic ships; documented in the
-        encoder design as the env's job, not the encoder's.
+        we resolve it through :func:`heuristic_discard`. The engine never
+        sees the sentinel — the encoder's design declares this resolution as
+        the env's responsibility, not the encoder's.
         """
         if isinstance(action, Action):
             return action

@@ -31,7 +31,7 @@ from domain.actions.base import Action
 from domain.enums import PortType, Resource, TurnPhase
 from domain.game.state import GameState
 from domain.ids import EdgeID, PlayerID, TileID, VertexID
-from domain.turn.pending import DiscardPending
+from rl.acting_player import acting_player
 from rl.encoding._action_layout import (
     ACTION_SPACE_SIZE,
     BUY_DEV_INDEX,
@@ -98,13 +98,6 @@ def _maritime_ratio(state: GameState, player_id: PlayerID, give: Resource) -> in
             if _TWO_ONE_FOR_RESOURCE[pt] is give:
                 r = min(r, 2)
     return r
-
-
-def _discard_player_id(state: GameState) -> PlayerID:
-    """Player owed a discard. Falls back to ``current_player`` outside DISCARD."""
-    if state.phase is TurnPhase.DISCARD and isinstance(state.pending, DiscardPending):
-        return next(iter(state.pending.cards_to_discard))
-    return state.current_player
 
 
 class ActionEncoder:
@@ -262,7 +255,7 @@ class ActionEncoder:
             )
 
         # idx == DISCARD_INDEX
-        return DiscardSentinel(player_id=_discard_player_id(state))
+        return DiscardSentinel(player_id=acting_player(state))
 
     # ------------------------------------------------------------------
     # mask

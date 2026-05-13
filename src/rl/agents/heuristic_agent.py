@@ -16,7 +16,7 @@ from domain.actions.base import Action
 from domain.enums import TurnPhase
 from domain.game.state import GameState
 from domain.ids import PlayerID
-from domain.turn.pending import DiscardPending
+from rl.acting_player import acting_player
 from rl.agents._heuristic_rules import (
     best_road,
     choose_discard,
@@ -47,7 +47,7 @@ class HeuristicAgent:
             return None
         state = snap.state
         phase = state.phase
-        me = _whoami(state)
+        me = acting_player(state)
 
         if phase is TurnPhase.INITIAL_SETTLEMENT:
             settlements = [a for a in legal if isinstance(a, A.PlaceSettlementAction)]
@@ -88,9 +88,3 @@ class HeuristicAgent:
         if fb is not None:
             return fb
         return legal[0]
-
-
-def _whoami(state: GameState) -> PlayerID:
-    if state.phase is TurnPhase.DISCARD and isinstance(state.pending, DiscardPending):
-        return next(iter(state.pending.cards_to_discard))
-    return state.current_player

@@ -28,10 +28,7 @@ from torch.distributions import Categorical
 from controller.session import GameSnapshot
 from domain.actions.base import Action
 from domain.engine.player_view import make_player_view
-from domain.enums import TurnPhase
-from domain.game.state import GameState
-from domain.ids import PlayerID
-from domain.turn.pending import DiscardPending
+from rl.acting_player import acting_player
 from rl.agents.base import ActStep
 from rl.agents.heuristic_agent import heuristic_discard
 from rl.encoding.action import ActionEncoder, DiscardSentinel
@@ -39,15 +36,6 @@ from rl.encoding.observation import FlatObservationEncoder
 from rl.models.mlp import MLPPolicyValue
 
 __all__ = ["PolicyAgent"]
-
-
-def _acting_player(state: GameState) -> PlayerID:
-    """Same convention as ``CatanEnv.current_agent`` — picks the discard owner
-    during DISCARD phase, otherwise the dice-roller / current_player.
-    """
-    if state.phase is TurnPhase.DISCARD and isinstance(state.pending, DiscardPending):
-        return next(iter(state.pending.cards_to_discard))
-    return state.current_player
 
 
 class PolicyAgent:
@@ -239,7 +227,7 @@ class PolicyAgent:
         if not mask.any():
             return legal[0]
 
-        acting = _acting_player(snap.state)
+        acting = acting_player(snap.state)
         view = make_player_view(snap.state, acting)
         obs = self._obs_encoder.encode(view)
 
