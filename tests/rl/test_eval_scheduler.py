@@ -80,6 +80,7 @@ def _fake_bench(name: str) -> Callable[[PolicyAgent], TournamentResult]:
                 turn_count=20,
                 end_reason=EndReason.WINNER,
                 action_histogram={},
+                per_seat_action_histogram={},
             ),
             GameStats(
                 winner=PlayerID(2),
@@ -87,6 +88,7 @@ def _fake_bench(name: str) -> Callable[[PolicyAgent], TournamentResult]:
                 turn_count=22,
                 end_reason=EndReason.WINNER,
                 action_histogram={},
+                per_seat_action_histogram={},
             ),
         ]
         win_counts: dict[PlayerID, int] = defaultdict(int)

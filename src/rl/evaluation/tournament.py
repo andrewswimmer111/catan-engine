@@ -11,7 +11,7 @@ from rl.agents.base import RLAgent
 from rl.env.catan_env import CatanEnv
 from rl.evaluation.metrics import GameStats, TournamentResult
 
-__all__ = ["Tournament"]
+__all__ = ["Tournament", "aggregate_games"]
 
 
 class Tournament:
@@ -25,7 +25,7 @@ class Tournament:
         base_seed: int,
     ) -> TournamentResult:
         games = [self._play_one(agents, base_seed + i) for i in range(n_games)]
-        return _aggregate(games, list(agents.keys()))
+        return aggregate_games(games, list(agents.keys()))
 
     def _play_one(
         self,
@@ -41,14 +41,20 @@ class Tournament:
             last_events=(),
         )
         action_counts: dict[str, int] = defaultdict(int)
+        per_seat_counts: dict[PlayerID, dict[str, int]] = {
+            pid: defaultdict(int) for pid in env.state.config.player_ids
+        }
         done = False
 
         while not done:
             legal = env.legal_actions()
-            action = agents[env.current_agent].choose(snap, legal)
+            acting = env.current_agent
+            action = agents[acting].choose(snap, legal)
             if action is None:
                 break
-            action_counts[type(action).__name__] += 1
+            name = type(action).__name__
+            action_counts[name] += 1
+            per_seat_counts[acting][name] += 1
             _, _, done, info = env.step(action)
             step_index += 1
             snap = GameSnapshot(
@@ -68,10 +74,13 @@ class Tournament:
             turn_count=state.turn_number,
             end_reason=state.end_reason or EndReason.STALEMATE_NO_PROGRESS,
             action_histogram=dict(action_counts),
+            per_seat_action_histogram={
+                pid: dict(per_seat_counts[pid]) for pid in per_seat_counts
+            },
         )
 
 
-def _aggregate(games: list[GameStats], player_ids: list[PlayerID]) -> TournamentResult:
+def aggregate_games(games: list[GameStats], player_ids: list[PlayerID]) -> TournamentResult:
     n = len(games)
     win_counts: dict[PlayerID, int] = defaultdict(int)
     vp_totals: dict[PlayerID, int] = defaultdict(int)
