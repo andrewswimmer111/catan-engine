@@ -128,12 +128,16 @@ class RolloutWorker:
     # Collection
     # ------------------------------------------------------------------
 
-    def collect(self, n_steps: int) -> RolloutStats:
+    def collect(self, n_steps: int, *, stop_at_episode: bool = False) -> RolloutStats:
         """Collect at most ``n_steps`` learner transitions into the buffer.
 
         Stops when either the requested learner-step count is met or the
         buffer fills, whichever comes first. May span multiple episodes;
         the env is reset internally on terminal steps.
+
+        Set ``stop_at_episode=True`` to return after the first completed
+        episode. The trainer uses this so opponents and the learner seat
+        can be re-sampled per episode in self-play.
         """
         if n_steps <= 0:
             raise ValueError(f"n_steps must be positive, got {n_steps}")
@@ -168,6 +172,9 @@ class RolloutWorker:
                     losses += 1
                 else:
                     stalemates += 1
+                if stop_at_episode:
+                    self._needs_reset = True
+                    break
                 if (
                     learner_steps < n_steps
                     and len(self._buffer) < self._buffer.capacity

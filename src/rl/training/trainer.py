@@ -1,14 +1,15 @@
-"""End-to-end PPO trainer: collect rollouts, run updates, log, checkpoint.
+"""End-to-end PPO trainer: collect rollouts, run updates, log, snapshot.
 
-The trainer is built around three callables provided at construction:
+The trainer is built around three callables / objects provided at construction:
 
 - ``env_factory(seed) -> CatanEnv`` — produces a fresh env per episode so
   reseeding is deterministic and the four seats are always in the same
   config order. The learner's *seat assignment* is rotated each episode by
   the trainer (see below), not by the factory.
-- ``opponent_factory(seed) -> dict[PlayerID, Agent]`` — returns an opponent
-  for every seat keyed by ``PlayerID``. The trainer drops the entry that
-  matches the learner's seat for that episode and uses the rest.
+- ``opponent_pool: OpponentPool`` — source of opponents. The trainer samples
+  ``n_opponents`` agents per episode and assigns them to the non-learner
+  seats. With an empty pool every slot falls back to the live learner — the
+  natural cold start for self-play.
 - A :class:`PolicyAgent` for the learner — the only object whose weights
   are updated.
 
@@ -20,6 +21,16 @@ PPO is sensitive to seat overfitting if the learner always plays seat 1
 the trainer samples a learner seat uniformly at random; the worker
 records every learner transition with the seat's PlayerID so per-agent
 GAE naturally segments by episode boundary.
+
+Self-play snapshots
+-------------------
+
+Every ``cfg.snapshot_every`` env steps the trainer writes a versioned
+checkpoint (see :mod:`rl.training.checkpoint`) to ``snapshot_dir`` and
+hands the path to the opponent pool's recent bucket. Every
+``cfg.promote_every_n_snapshots`` snapshots one entry is promoted into
+the historical reservoir. Snapshots are disabled when ``snapshot_dir`` is
+``None``.
 
 PPO update over the rollout
 ---------------------------
@@ -34,20 +45,28 @@ to the learner — no per-seat filtering is needed.
 from __future__ import annotations
 
 import random
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
 import torch
 
-from controller.agents import Agent
 from domain.ids import PlayerID
 from rl.agents.policy_agent import PolicyAgent
 from rl.encoding.action import ACTION_SPACE_SIZE
-from rl.encoding.observation import OBS_SHAPE
+from rl.encoding.observation import OBS_LAYOUT_VERSION, OBS_SHAPE
 from rl.env.catan_env import CatanEnv
 from rl.replay.buffer import TrajectoryBuffer
+from rl.training.checkpoint import (
+    ACTION_LAYOUT_VERSION,
+    CheckpointMeta,
+    ModelArch,
+    compute_config_hash,
+    save_checkpoint,
+)
 from rl.training.config import TrainConfig
+from rl.training.opponent_pool import OpponentPool
 from rl.training.ppo import ppo_update
 from rl.training.rollout import RolloutWorker
 from rl.utils.logging import NoOpLogger, TBLogger, make_logger
@@ -62,13 +81,14 @@ class Trainer:
         self,
         env_factory: Callable[[int], CatanEnv],
         learner: PolicyAgent,
-        opponent_factory: Callable[[int], dict[PlayerID, Agent]],
+        opponent_pool: OpponentPool,
         cfg: TrainConfig,
         log_dir: str | Path | None = None,
+        snapshot_dir: str | Path | None = None,
     ) -> None:
         self._env_factory = env_factory
         self._learner = learner
-        self._opponent_factory = opponent_factory
+        self._opponent_pool = opponent_pool
         self._cfg = cfg
 
         # Discover player seats by spinning up a throwaway env. Re-using the
@@ -90,6 +110,18 @@ class Trainer:
         self._iteration = 0
         self._seed_counter = cfg.seed
 
+        self._snapshot_dir: Path | None = Path(snapshot_dir) if snapshot_dir else None
+        if self._snapshot_dir is not None:
+            self._snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self._last_snapshot_step: int = 0
+        self._n_snapshots: int = 0
+        self._config_hash: str = compute_config_hash(cfg)
+        self._model_arch = ModelArch(
+            obs_dim=OBS_SHAPE[0],
+            action_dim=ACTION_SPACE_SIZE,
+            hidden=tuple(learner.model.hidden),
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -102,6 +134,18 @@ class Trainer:
     def iteration(self) -> int:
         return self._iteration
 
+    @property
+    def opponent_pool(self) -> OpponentPool:
+        return self._opponent_pool
+
+    @property
+    def learner(self) -> PolicyAgent:
+        return self._learner
+
+    @property
+    def logger(self) -> TBLogger | NoOpLogger:
+        return self._logger
+
     def train(self, total_steps: int) -> None:
         """Train until ``self.global_step`` reaches ``total_steps``."""
         last_eval_step = -self._cfg.eval_every  # force eval on first iter
@@ -110,6 +154,7 @@ class Trainer:
             self._compute_advantages(last_worker)
             update_metrics = self._ppo_step()
             self._log_iteration(rollout_summary, update_metrics)
+            self._maybe_snapshot()
             if (
                 self._cfg.eval_every > 0
                 and self._global_step - last_eval_step >= self._cfg.eval_every
@@ -120,44 +165,43 @@ class Trainer:
         self._logger.flush()
 
     def save_checkpoint(self, path: str | Path) -> None:
-        """Write model weights, optimizer state, and trainer counters."""
-        torch.save(
-            {
-                "model": self._learner.state_dict(),
-                "optimizer": self._optimizer.state_dict(),
-                "iteration": self._iteration,
-                "global_step": self._global_step,
-            },
-            str(path),
-        )
+        """Write a versioned :class:`CheckpointMeta`-tagged checkpoint to ``path``."""
+        save_checkpoint(self._learner, Path(path), self._build_meta())
 
     # ------------------------------------------------------------------
     # Rollout
     # ------------------------------------------------------------------
 
     def _collect_rollout(self) -> tuple[dict[str, float], RolloutWorker]:
-        """Collect ``cfg.rollout_steps`` learner transitions into the buffer."""
+        """Collect ``cfg.rollout_steps`` learner transitions into the buffer.
+
+        New env, new opponent assignment, and new learner seat per episode —
+        ``RolloutWorker.collect(..., stop_at_episode=True)`` returns after one
+        completed game so the next iteration can re-sample.
+        """
         self._buffer.clear()
         agg: dict[str, float] = defaultdict(float)
         all_returns: list[float] = []
         last_worker: RolloutWorker | None = None
         steps_before = self._global_step
+        n_opponents = len(self._player_ids) - 1
 
         while len(self._buffer) < self._cfg.rollout_steps:
             learner_seat = self._rng.choice(self._player_ids)
             env = self._env_factory(self._seed_counter)
-            factory_agents = self._opponent_factory(self._seed_counter)
+            opponent_agents = self._opponent_pool.sample_opponents(
+                self._learner, n=n_opponents
+            )
             opponents = {
-                pid: a for pid, a in factory_agents.items() if pid != learner_seat
-            }
-            if len(opponents) != len(self._player_ids) - 1:
-                raise ValueError(
-                    f"opponent_factory must return an agent for every seat; "
-                    f"got {sorted(factory_agents.keys())}"
+                pid: a
+                for pid, a in zip(
+                    (p for p in self._player_ids if p != learner_seat),
+                    opponent_agents,
                 )
+            }
             worker = RolloutWorker(env, self._learner, opponents, self._buffer)
             n_remaining = self._cfg.rollout_steps - len(self._buffer)
-            stats = worker.collect(n_remaining)
+            stats = worker.collect(n_remaining, stop_at_episode=True)
             agg["episodes"] += stats.episodes_completed
             agg["wins"] += stats.learner_wins
             agg["losses"] += stats.learner_losses
@@ -169,10 +213,7 @@ class Trainer:
 
             # Safety: if the worker can't make progress (no transitions added
             # and no episode completed), break to avoid an infinite loop.
-            if (
-                stats.learner_steps == 0
-                and stats.episodes_completed == 0
-            ):
+            if stats.learner_steps == 0 and stats.episodes_completed == 0:
                 break
 
         if last_worker is None:
@@ -184,6 +225,10 @@ class Trainer:
             "rollout/losses": agg["losses"],
             "rollout/stalemates": agg["stalemates"],
             "rollout/steps": float(self._global_step - steps_before),
+            "pool/recent_size": float(len(self._opponent_pool.recent_paths)),
+            "pool/historical_size": float(
+                len(self._opponent_pool.historical_paths)
+            ),
         }
         if agg["episodes"] > 0:
             summary["rollout/win_rate"] = agg["wins"] / agg["episodes"]
@@ -225,6 +270,38 @@ class Trainer:
             batch=full_batch,
             cfg=self._cfg.ppo,
             device=self._learner.device,
+        )
+
+    # ------------------------------------------------------------------
+    # Snapshotting (self-play)
+    # ------------------------------------------------------------------
+
+    def _maybe_snapshot(self) -> None:
+        if self._snapshot_dir is None:
+            return
+        if self._cfg.snapshot_every <= 0:
+            return
+        if self._global_step - self._last_snapshot_step < self._cfg.snapshot_every:
+            return
+        self._last_snapshot_step = self._global_step
+        path = self._snapshot_dir / f"snapshot_step_{self._global_step}.pt"
+        save_checkpoint(self._learner, path, self._build_meta())
+        self._opponent_pool.add_checkpoint(path)
+        self._n_snapshots += 1
+        if (
+            self._cfg.promote_every_n_snapshots > 0
+            and self._n_snapshots % self._cfg.promote_every_n_snapshots == 0
+        ):
+            self._opponent_pool.promote_to_historical()
+
+    def _build_meta(self) -> CheckpointMeta:
+        return CheckpointMeta(
+            obs_layout_version=OBS_LAYOUT_VERSION,
+            action_layout_version=ACTION_LAYOUT_VERSION,
+            model_arch=self._model_arch,
+            train_step=self._global_step,
+            timestamp=time.time(),
+            config_hash=self._config_hash,
         )
 
     # ------------------------------------------------------------------

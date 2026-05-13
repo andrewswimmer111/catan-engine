@@ -1,13 +1,15 @@
-"""Nightly convergence integration test for the PPO baseline (rl-015).
+"""Nightly convergence integration test for the PPO baseline (rl-015 → rl-018).
 
 Run with::
 
     pytest -m nightly tests/rl/test_trainer_convergence.py
 
-The test trains the default-baseline PPO config for 500k env steps
-against three random opponents and asserts a > 60% win rate at the end.
-The threshold is intentionally below the rl-015 ten-million-step
-acceptance criterion (> 90%) — 500k is the nightly checkpoint and
+The test trains the default-baseline PPO config for 500k env steps under
+the rl-018 self-play regime — opponents come from an :class:`OpponentPool`
+seeded only with the live learner at start, accumulating snapshots as
+training progresses — and asserts a > 60% win rate against three random
+opponents in the final 100-game tournament. The threshold is intentionally
+below the long-run convergence target — 500k is the nightly checkpoint and
 catches major regressions (silent reward bugs, broken masking, etc.)
 without burning hours per run.
 
@@ -26,7 +28,6 @@ from pathlib import Path
 import pytest
 import torch
 
-from controller.agents import Agent
 from domain.ids import PlayerID
 from rl.agents.policy_agent import PolicyAgent
 from rl.agents.random_agent import RandomAgent
@@ -36,14 +37,15 @@ from rl.env.catan_env import CatanEnv
 from rl.evaluation.tournament import Tournament
 from rl.models.mlp import MLPPolicyValue
 from rl.training.config import DEFAULT_BASELINE_CONFIG
+from rl.training.opponent_pool import OpponentPool
 from rl.training.trainer import Trainer
 
 
 PLAYER_IDS = [PlayerID(i) for i in range(1, 5)]
 
-# Tunables for this test. The full 10M-step convergence target lives outside
-# the test suite — run the trainer directly with cfg.eval_every=50_000 to
-# observe the climb.
+# Tunables for this test. The full long-run convergence target lives
+# outside the test suite — run the trainer directly with eval_every set
+# small to watch the climb.
 TRAINING_STEPS = 500_000
 EVAL_GAMES = 100
 EVAL_WIN_RATE_FLOOR = 0.60
@@ -53,28 +55,22 @@ def _env_factory(seed: int) -> CatanEnv:
     return CatanEnv(seed=seed)
 
 
-def _opponent_factory(seed: int) -> dict[PlayerID, Agent]:
-    rng = random.Random(seed)
-    return {
-        pid: RandomAgent(random.Random(rng.randrange(2**32)), skip_proposals=True)
-        for pid in PLAYER_IDS
-    }
-
-
 @pytest.mark.nightly
 def test_ppo_beats_random_at_500k_steps(tmp_path: Path) -> None:
-    """Train the default-baseline config for 500k steps; expect > 60% win rate."""
+    """Train 500k steps in self-play; expect > 60% win rate vs random."""
     torch.manual_seed(0)
     cfg = DEFAULT_BASELINE_CONFIG
     model = MLPPolicyValue(OBS_SHAPE[0], ACTION_SPACE_SIZE, hidden=cfg.hidden_sizes)
     learner = PolicyAgent(model, ActionEncoder(PLAYER_IDS))
+    pool = OpponentPool(rng=random.Random(0))
 
     trainer = Trainer(
         env_factory=_env_factory,
         learner=learner,
-        opponent_factory=_opponent_factory,
+        opponent_pool=pool,
         cfg=cfg,
         log_dir=str(tmp_path / "tb"),
+        snapshot_dir=tmp_path / "snapshots",
     )
     trainer.train(total_steps=TRAINING_STEPS)
     trainer.save_checkpoint(tmp_path / "final.pt")

@@ -52,7 +52,14 @@ class TrainConfig:
     hidden_sizes: tuple[int, ...] = (512, 512, 512)
     eval_every: int = 50_000
     eval_n_games: int = 30
-    checkpoint_every: int = 100_000
+    snapshot_every: int = 5_000_000
+    """Env-step interval between checkpoint snapshots written into the
+    :class:`OpponentPool`. Defaults to 5M because flooding the pool with
+    near-identical recent checkpoints hurts opponent diversity — the spec
+    recommends not exceeding once per ~5M steps."""
+    promote_every_n_snapshots: int = 4
+    """Number of recent snapshots between calls to
+    :meth:`OpponentPool.promote_to_historical`."""
     log_every: int = 1
     seed: int = 0
 
@@ -74,7 +81,8 @@ DEFAULT_BASELINE_CONFIG: TrainConfig = TrainConfig(
     hidden_sizes=(512, 512, 512),
     eval_every=50_000,
     eval_n_games=30,
-    checkpoint_every=100_000,
+    snapshot_every=5_000_000,
+    promote_every_n_snapshots=4,
     log_every=1,
     seed=0,
 )
