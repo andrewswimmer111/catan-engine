@@ -62,6 +62,17 @@ class TrainConfig:
     :meth:`OpponentPool.promote_to_historical`."""
     log_every: int = 1
     seed: int = 0
+    num_envs: int = 1
+    """Parallel rollout envs. ``1`` is the single-process
+    :class:`RolloutWorker` path (today's default).
+
+    Values >1 are intended to use the :class:`VecRolloutWorker` and
+    :class:`SubprocVecEnv` shipped alongside, but the Trainer doesn't read
+    this field yet — wiring it requires reconciling :class:`OpponentPool`'s
+    shared in-main-process state with subprocess factories (the pool's
+    checkpoints would need to be re-loaded per subprocess, or assignments
+    serialized from main per episode). The vec env machinery is usable
+    standalone today; the trainer-side flip is deferred to a follow-up."""
 
 
 DEFAULT_BASELINE_CONFIG: TrainConfig = TrainConfig(

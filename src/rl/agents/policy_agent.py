@@ -113,6 +113,71 @@ class PolicyAgent:
             entropy=float(entropy_t.item()),
         )
 
+    def act_batch(
+        self,
+        obs: np.ndarray,
+        mask: np.ndarray,
+        generators: list[torch.Generator] | None = None,
+        deterministic: bool = False,
+    ) -> list[ActStep]:
+        """Batched sample of actions for ``B`` parallel envs.
+
+        ``obs`` is shape ``(B, obs_dim)`` and ``mask`` is ``(B, action_dim)``.
+        Returns ``B`` :class:`ActStep` records in input order. The vec env
+        path uses this to amortise a single GPU forward over ``num_envs``
+        decisions.
+
+        ``generators`` is a list of per-row :class:`torch.Generator`. When
+        provided, each row is sampled with its own generator so the
+        per-env trajectory is independent of how many other envs are in the
+        batch — required for the determinism test that rolls a vec env
+        against a sequential reference run.
+        """
+        if obs.ndim != 2 or mask.ndim != 2:
+            raise ValueError(
+                f"act_batch requires 2-D obs/mask, got {obs.shape} / {mask.shape}"
+            )
+        if obs.shape[0] != mask.shape[0]:
+            raise ValueError(
+                f"obs/mask batch dims disagree: {obs.shape[0]} vs {mask.shape[0]}"
+            )
+
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self._device)
+        mask_t = torch.as_tensor(mask, dtype=torch.bool, device=self._device)
+
+        with torch.no_grad():
+            out = self._model(obs_t, mask_t)
+            probs = torch.softmax(out.logits, dim=-1)
+            if deterministic:
+                action_t = torch.argmax(out.logits, dim=-1)
+            elif generators is None:
+                action_t = Categorical(probs=probs).sample()
+            else:
+                if len(generators) != obs.shape[0]:
+                    raise ValueError(
+                        f"generators length {len(generators)} != batch size {obs.shape[0]}"
+                    )
+                # Per-row sampling so each env's action draw is deterministic
+                # under its own generator regardless of batch order.
+                action_idxs = [
+                    int(torch.multinomial(probs[i], 1, generator=gen).item())
+                    for i, gen in enumerate(generators)
+                ]
+                action_t = torch.tensor(action_idxs, device=self._device)
+            log_probs = torch.log_softmax(out.logits, dim=-1)
+            logp_t = log_probs.gather(-1, action_t.unsqueeze(-1)).squeeze(-1)
+            entropy_t = -(probs * log_probs).sum(dim=-1)
+
+        return [
+            ActStep(
+                action_idx=int(action_t[i].item()),
+                logp=float(logp_t[i].item()),
+                value=float(out.value[i].item()),
+                entropy=float(entropy_t[i].item()),
+            )
+            for i in range(obs.shape[0])
+        ]
+
     def act_with_dist(
         self,
         obs: np.ndarray,
