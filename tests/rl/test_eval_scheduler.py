@@ -202,6 +202,34 @@ def test_ratings_persisted_to_disk(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
+@pytest.mark.slow
+def test_scheduler_archives_interesting_games(tmp_path: Path) -> None:
+    """Wiring smoke for rl-021 archive hook.
+
+    The archive should accumulate a directory per game it decides was
+    interesting. We accept a wide range (1..n_games inclusive) because
+    interestingness is data-dependent and we only want to confirm the
+    wiring actually fires and writes something.
+    """
+    trainer = _FakeTrainer(_make_learner())
+    archive_root = tmp_path / "episodes"
+    sched = EvalScheduler(
+        trainer=trainer,  # type: ignore[arg-type]
+        every_steps=100,
+        benchmarks={"fake": _fake_bench("fake")},
+        archive_root=archive_root,
+        archive_n_games=3,
+    )
+    metrics = sched.maybe_run(0)
+    assert metrics is not None
+    assert "archive/written" in metrics
+    from rl.replay.dataset import ReplayDataset
+    ds = ReplayDataset(archive_root)
+    n_written = len(ds.list_episodes())
+    assert n_written == int(metrics["archive/written"])
+    assert 0 <= n_written <= 3
+
+
 def test_default_benchmark_factories_produce_callables(tmp_path: Path) -> None:
     """Sanity-check the default benchmark constructors return callables that
     actually play games and return a non-empty TournamentResult. The games

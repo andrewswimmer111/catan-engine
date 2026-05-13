@@ -113,6 +113,46 @@ class PolicyAgent:
             entropy=float(entropy_t.item()),
         )
 
+    def act_with_dist(
+        self,
+        obs: np.ndarray,
+        mask: np.ndarray,
+        deterministic: bool = False,
+    ) -> tuple[ActStep, np.ndarray]:
+        """Like :meth:`act` but also returns the full masked softmax dist.
+
+        Used by the replay archiver — illegal actions stay at ~0 (the mask
+        fill sends their logits to -1e9 before softmax), so the returned
+        vector is safe to feed straight into a top-K display.
+        """
+        if not mask.any():
+            raise ValueError("action mask is all False; no legal action to sample")
+
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self._device).unsqueeze(0)
+        mask_t = torch.as_tensor(mask, dtype=torch.bool, device=self._device).unsqueeze(0)
+
+        with torch.no_grad():
+            out = self._model(obs_t, mask_t)
+            probs = torch.softmax(out.logits, dim=-1)
+            dist = Categorical(probs=probs)
+            if deterministic:
+                action_t = torch.argmax(out.logits, dim=-1)
+            else:
+                action_t = dist.sample()
+            logp_t = dist.log_prob(action_t)
+            entropy_t = dist.entropy()
+
+        action_dist = probs.squeeze(0).cpu().numpy()
+        return (
+            ActStep(
+                action_idx=int(action_t.item()),
+                logp=float(logp_t.item()),
+                value=float(out.value.item()),
+                entropy=float(entropy_t.item()),
+            ),
+            action_dist,
+        )
+
     # ------------------------------------------------------------------
     # Engine / play path
     # ------------------------------------------------------------------

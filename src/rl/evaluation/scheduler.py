@@ -40,6 +40,8 @@ from rl.env.catan_env import CatanEnv
 from rl.evaluation.elo import EloTracker
 from rl.evaluation.metrics import GameStats, TournamentResult
 from rl.evaluation.tournament import Tournament
+from rl.replay.dataset import ReplayDataset, is_interesting
+from rl.replay.recorder import play_episode
 from rl.training.opponent_pool import OpponentPool
 from rl.training.trainer import Trainer
 
@@ -71,6 +73,9 @@ class EvalScheduler:
         benchmarks: dict[str, BenchmarkCallable],
         elo: EloTracker | None = None,
         ratings_path: Path | None = None,
+        archive_root: Path | None = None,
+        archive_n_games: int = 5,
+        archive_env_factory: Callable[[int], CatanEnv] | None = None,
     ) -> None:
         if every_steps <= 0:
             raise ValueError(f"every_steps must be positive, got {every_steps}")
@@ -82,6 +87,17 @@ class EvalScheduler:
         # Negative sentinel so the first ``maybe_run`` after construction
         # fires when ``current_step >= 0``.
         self._last_eval_step: int = -every_steps
+
+        self._archive: ReplayDataset | None = (
+            ReplayDataset(archive_root) if archive_root is not None else None
+        )
+        self._archive_n_games = archive_n_games
+        # The archiver needs to construct its own envs (the benchmarks own
+        # their factories internally and don't expose them). Caller can
+        # override with whatever factory matches the active game config.
+        self._archive_env_factory = archive_env_factory or (
+            lambda seed: CatanEnv(seed=seed)
+        )
 
     # ------------------------------------------------------------------
     # Accessors
@@ -126,11 +142,61 @@ class EvalScheduler:
         if self._ratings_path is not None:
             self._elo.save(self._ratings_path)
 
+        if self._archive is not None:
+            n_written = self._archive_some_games(current_step)
+            metrics["archive/written"] = float(n_written)
+            self._trainer.logger.log_scalar(
+                "archive/written", n_written, current_step
+            )
+
         return metrics
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Archival
+    # ------------------------------------------------------------------
+
+    def _archive_some_games(self, current_step: int) -> int:
+        """Play a small batch of vs-random games and archive interesting ones.
+
+        Random opponents give the most diverse trajectories — checkpoint
+        opponents tend to homogenise into a handful of opening patterns at
+        the same training step. Returns the number of games actually
+        written (i.e. that passed :func:`is_interesting`).
+        """
+        assert self._archive is not None
+        written = 0
+        base_seed = 900_000 + current_step  # distinct from benchmark seeds
+        rng = random.Random(current_step)
+        for i in range(self._archive_n_games):
+            seed = base_seed + i
+            env = self._archive_env_factory(seed)
+            player_ids = list(env.state.config.player_ids)
+            learner_seat = player_ids[0]
+            opponents = {
+                pid: RandomAgent(
+                    random.Random(rng.randrange(2**32)), skip_proposals=True
+                )
+                for pid in player_ids[1:]
+            }
+            ep = play_episode(
+                env=env,
+                learner=self._trainer.learner,
+                learner_seat=learner_seat,
+                opponents=opponents,  # type: ignore[arg-type]
+                metadata={
+                    "checkpoint_step": int(current_step),
+                    "seed": int(seed),
+                    "source": "eval_scheduler",
+                },
+            )
+            if is_interesting(ep.final_vps, ep.winner):
+                self._archive.write(ep)
+                written += 1
+        return written
 
     def _update_elo_from_result(
         self,
