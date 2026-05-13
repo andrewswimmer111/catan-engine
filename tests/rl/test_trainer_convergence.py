@@ -1,18 +1,21 @@
-"""Slow convergence integration test for the PPO baseline (rl-015).
+"""Nightly convergence integration test for the PPO baseline (rl-015).
 
 Run with::
 
-    pytest -m slow tests/rl/test_trainer_convergence.py
+    pytest -m nightly tests/rl/test_trainer_convergence.py
 
 The test trains the default-baseline PPO config for 500k env steps
 against three random opponents and asserts a > 60% win rate at the end.
 The threshold is intentionally below the rl-015 ten-million-step
-acceptance criterion (> 90%) — 500k is the *nightly CI* checkpoint and
+acceptance criterion (> 90%) — 500k is the nightly checkpoint and
 catches major regressions (silent reward bugs, broken masking, etc.)
 without burning hours per run.
 
-Wall time on a CPU: ~50 minutes for 500k steps at ~170 steps/sec. Move
-to GPU + vectorised envs (rl-023) to bring this under 5 minutes.
+Wall time on a CPU: ~50 minutes for 500k steps at ~170 steps/sec. The
+test is tagged ``nightly`` rather than ``slow`` so the broader slow
+suite (full-game tournaments, ~minutes) can still run on every PR
+without dragging in this multi-tens-of-minutes run. Move to GPU +
+vectorised envs (rl-023) to bring this under 5 minutes.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ def _opponent_factory(seed: int) -> dict[PlayerID, Agent]:
     }
 
 
-@pytest.mark.slow
+@pytest.mark.nightly
 def test_ppo_beats_random_at_500k_steps(tmp_path: Path) -> None:
     """Train the default-baseline config for 500k steps; expect > 60% win rate."""
     torch.manual_seed(0)
