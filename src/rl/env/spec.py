@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from domain.actions.base import Action
     from domain.events.base import GameEvent
 
-# The encoded observation type returned by CatanEnv (rl-007 onwards).
+# The encoded observation type returned by CatanEnv
 Observation = np.ndarray
 
 __all__ = ["Observation", "Info"]
