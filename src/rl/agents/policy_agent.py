@@ -59,11 +59,18 @@ class PolicyAgent:
         action_encoder: ActionEncoder,
         obs_encoder: FlatObservationEncoder | None = None,
         device: str | torch.device = "cpu",
+        *,
+        stochastic_play: bool = False,
     ) -> None:
         self._device = torch.device(device)
         self._model = model.to(self._device)
         self._action_encoder = action_encoder
         self._obs_encoder = obs_encoder or FlatObservationEncoder()
+        # ``choose`` defaults to deterministic argmax (the canonical eval
+        # policy). Opponent-inference siblings flip this to sample from the
+        # masked categorical so self-play opponents stay exploration-friendly
+        # rather than collapsing onto a greedy strategy that's easy to game.
+        self.stochastic_play = stochastic_play
 
     # ------------------------------------------------------------------
     # Training path
@@ -131,7 +138,7 @@ class PolicyAgent:
         view = make_player_view(snap.state, acting)
         obs = self._obs_encoder.encode(view)
 
-        step = self.act(obs, mask, deterministic=True)
+        step = self.act(obs, mask, deterministic=not self.stochastic_play)
         decoded = self._action_encoder.decode(step.action_idx, snap.state)
         if isinstance(decoded, DiscardSentinel):
             return heuristic_discard(snap.state, decoded.player_id)
@@ -148,6 +155,14 @@ class PolicyAgent:
     @property
     def device(self) -> torch.device:
         return self._device
+
+    @property
+    def action_encoder(self) -> ActionEncoder:
+        return self._action_encoder
+
+    @property
+    def obs_encoder(self) -> FlatObservationEncoder:
+        return self._obs_encoder
 
     def state_dict(self) -> dict[str, Any]:
         return self._model.state_dict()
