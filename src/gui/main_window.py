@@ -28,8 +28,11 @@ from gui.widgets.action_panel import ActionPanel
 from gui.widgets.board_canvas import BoardCanvas
 from gui.widgets.event_log import EventLogWidget
 from gui.widgets.player_panel import PlayerPanel
+from gui.widgets.policy_overlay import PolicyOverlayWidget
 from gui.widgets.timeline import TimelineWidget
 from gui.widgets.trade_panel import TradePanel
+from rl.encoding.action import ActionEncoder
+from rl.utils.gui_hook import load_episode_into_session
 from serialization.replay import load_replay, save_replay
 
 
@@ -92,6 +95,13 @@ class MainWindow(QMainWindow):
         log_dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
         self.addDockWidget(Qt.BottomDockWidgetArea, log_dock)
 
+        # Policy overlay dock — populated only when an RL replay is loaded.
+        self._policy_overlay = PolicyOverlayWidget()
+        overlay_dock = QDockWidget("Policy Overlay", self)
+        overlay_dock.setWidget(self._policy_overlay)
+        overlay_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, overlay_dock)
+
         self._canvas.vertex_clicked.connect(self._on_vertex_clicked)
         self._canvas.edge_clicked.connect(self._on_edge_clicked)
         self._canvas.tile_clicked.connect(self._on_tile_clicked)
@@ -118,6 +128,7 @@ class MainWindow(QMainWindow):
         menu = self.menuBar().addMenu("File")
         menu.addAction("Save Replay…", self._save_replay)
         menu.addAction("Load Replay…", self._load_replay)
+        menu.addAction("Open RL Replay…", self._load_rl_replay)
         menu.addSeparator()
         menu.addAction("Quit", self.close)
 
@@ -183,7 +194,21 @@ class MainWindow(QMainWindow):
             log = load_replay(path)
             engine = GameEngine(SeededRandomizer(seed=log.config.seed))
             new_session = GameSession.from_replay(engine, log)
+            self._policy_overlay.clear()
             self._replace_session(new_session)
+
+    def _load_rl_replay(self) -> None:
+        """Open an :class:`EpisodeRecord` directory and overlay its policy data."""
+        from pathlib import Path
+
+        ep_dir = QFileDialog.getExistingDirectory(self, "Open RL Replay")
+        if not ep_dir:
+            return
+        loaded = load_episode_into_session(Path(ep_dir))
+        new_session = loaded.session
+        encoder = ActionEncoder(list(new_session.current().state.config.player_ids))
+        self._policy_overlay.set_overlay(loaded.overlay, encoder)
+        self._replace_session(new_session)
 
     def _replace_session(self, session: GameSession) -> None:
         self._session = session
@@ -238,6 +263,7 @@ class MainWindow(QMainWindow):
         self._trade.refresh(snap, legal)
         self._timeline.refresh(snap)
         self._refresh_player_panels(snap)
+        self._policy_overlay.on_step_changed(snap)
 
     def refresh(self, snap: GameSnapshot) -> None:
         self._render(snap)
