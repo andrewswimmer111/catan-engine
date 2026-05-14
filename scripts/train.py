@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Train driver for the PPO learner.
+
+This is the scripted entry point referenced in ``rl.cli``'s docstring — the
+CLI's ``train`` subcommand is a thin smoke wrapper, this is what real runs
+(sweeps, long convergence runs, anything that needs anything other than the
+defaults) go through.
+
+What it does on top of the CLI:
+
+* Exposes every interesting hyperparameter as a flag (``--lr``,
+  ``--entropy-coef``, ``--clip-range``, ``--hidden-sizes``, ``--rollout-steps``,
+  ``--num-envs``, ``--eval-every``, ``--snapshot-every``, …).
+* Wires an :class:`EvalScheduler` into the trainer with the three baseline
+  benchmark families (vs random / vs heuristic / vs pool) and an Elo tracker
+  whose ratings are persisted next to the TB log.
+* Switches the rollout collector to :class:`SubprocVecEnv` when ``--num-envs >
+  1`` using ``rl.training.vec_factories.random_opponents_factory``.
+
+Outputs (under ``--output-dir``, default ``runs/<timestamp>``):
+
+* ``tb/`` — TensorBoard event files.
+* ``snapshots/`` — periodic ``.pt`` checkpoints.
+* ``elo.json`` — Elo trajectory across evals.
+* ``final.pt`` — final checkpoint written on clean exit.
+
+Usage::
+
+    python scripts/train.py --total-steps 1_000_000 --num-envs 4 \\
+        --output-dir runs/exp1
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+import time
+from pathlib import Path
+
+import torch
+
+from domain.ids import PlayerID
+from rl.agents.policy_agent import PolicyAgent
+from rl.encoding.action import ACTION_SPACE_SIZE, ActionEncoder
+from rl.encoding.observation import OBS_SHAPE
+from rl.env.catan_env import CatanEnv
+from rl.evaluation.elo import EloTracker
+from rl.evaluation.scheduler import (
+    EvalScheduler,
+    make_bench_vs_heuristic,
+    make_bench_vs_pool,
+    make_bench_vs_random,
+)
+from rl.models.mlp import MLPPolicyValue
+from rl.training.config import DEFAULT_BASELINE_CONFIG, PPOConfig, TrainConfig
+from rl.training.opponent_pool import OpponentPool
+from rl.training.trainer import Trainer
+from rl.training.vec_factories import (
+    heuristic_opponents_factory,
+    random_opponents_factory,
+)
+
+
+_PLAYER_IDS: list[PlayerID] = [PlayerID(i) for i in range(1, 5)]
+
+
+def _env_factory(seed: int) -> CatanEnv:
+    return CatanEnv(seed=seed)
+
+
+def _parse_hidden(spec: str) -> tuple[int, ...]:
+    """Parse ``"512,512,512"`` into ``(512, 512, 512)``."""
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError(f"empty hidden-sizes spec: {spec!r}")
+    return tuple(int(p) for p in parts)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="scripts/train.py",
+        description="Train the PPO learner against a self-play pool.",
+    )
+
+    # Training duration / determinism.
+    p.add_argument("--total-steps", type=int, default=1_000_000)
+    p.add_argument("--seed", type=int, default=0)
+
+    # Run output.
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="root for tb/, snapshots/, elo.json. Default: runs/<timestamp>",
+    )
+
+    # PPO update hyperparameters.
+    p.add_argument("--lr", type=float, default=DEFAULT_BASELINE_CONFIG.ppo.lr)
+    p.add_argument(
+        "--clip-range", type=float, default=DEFAULT_BASELINE_CONFIG.ppo.clip_range
+    )
+    p.add_argument(
+        "--value-coef", type=float, default=DEFAULT_BASELINE_CONFIG.ppo.value_coef
+    )
+    p.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=DEFAULT_BASELINE_CONFIG.ppo.entropy_coef,
+    )
+    p.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=DEFAULT_BASELINE_CONFIG.ppo.max_grad_norm,
+    )
+    p.add_argument(
+        "--n-epochs", type=int, default=DEFAULT_BASELINE_CONFIG.ppo.n_epochs
+    )
+    p.add_argument(
+        "--minibatch-size",
+        type=int,
+        default=DEFAULT_BASELINE_CONFIG.ppo.minibatch_size,
+    )
+    p.add_argument(
+        "--target-kl",
+        type=float,
+        default=DEFAULT_BASELINE_CONFIG.ppo.target_kl,
+        help="set <= 0 to disable early-stop",
+    )
+
+    # Trainer orchestration.
+    p.add_argument(
+        "--rollout-steps",
+        type=int,
+        default=DEFAULT_BASELINE_CONFIG.rollout_steps,
+    )
+    p.add_argument("--gamma", type=float, default=DEFAULT_BASELINE_CONFIG.gamma)
+    p.add_argument(
+        "--gae-lambda", type=float, default=DEFAULT_BASELINE_CONFIG.gae_lambda
+    )
+    p.add_argument(
+        "--hidden-sizes",
+        type=_parse_hidden,
+        default=DEFAULT_BASELINE_CONFIG.hidden_sizes,
+        help="comma-separated MLP widths, e.g. 512,512,512",
+    )
+    p.add_argument(
+        "--num-envs",
+        type=int,
+        default=1,
+        help="parallel rollout subprocesses. >1 enables SubprocVecEnv path.",
+    )
+    p.add_argument(
+        "--vec-opponents",
+        choices=("random", "heuristic"),
+        default="random",
+        help="opponent setup baked into each vec worker (ignored if num-envs==1)",
+    )
+
+    # Snapshots / self-play pool.
+    p.add_argument(
+        "--snapshot-every",
+        type=int,
+        default=DEFAULT_BASELINE_CONFIG.snapshot_every,
+    )
+    p.add_argument(
+        "--promote-every-n-snapshots",
+        type=int,
+        default=DEFAULT_BASELINE_CONFIG.promote_every_n_snapshots,
+    )
+
+    # Eval.
+    p.add_argument(
+        "--eval-every",
+        type=int,
+        default=DEFAULT_BASELINE_CONFIG.eval_every,
+    )
+    p.add_argument(
+        "--eval-games",
+        type=int,
+        default=DEFAULT_BASELINE_CONFIG.eval_n_games,
+    )
+    p.add_argument(
+        "--no-eval-heuristic",
+        action="store_true",
+        help="skip the vs-heuristic benchmark (full games are ~3× slower than vs-random)",
+    )
+    p.add_argument(
+        "--no-eval-pool",
+        action="store_true",
+        help="skip the vs-pool benchmark",
+    )
+    p.add_argument(
+        "--archive-dir",
+        type=Path,
+        default=None,
+        help="optional replay archive root (off by default)",
+    )
+
+    return p
+
+
+def _build_config(args: argparse.Namespace) -> TrainConfig:
+    target_kl = args.target_kl if args.target_kl > 0 else None
+    return TrainConfig(
+        ppo=PPOConfig(
+            lr=args.lr,
+            clip_range=args.clip_range,
+            value_coef=args.value_coef,
+            entropy_coef=args.entropy_coef,
+            max_grad_norm=args.max_grad_norm,
+            n_epochs=args.n_epochs,
+            minibatch_size=args.minibatch_size,
+            target_kl=target_kl,
+        ),
+        rollout_steps=args.rollout_steps,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        hidden_sizes=tuple(args.hidden_sizes),
+        eval_every=args.eval_every,
+        eval_n_games=args.eval_games,
+        snapshot_every=args.snapshot_every,
+        promote_every_n_snapshots=args.promote_every_n_snapshots,
+        log_every=1,
+        seed=args.seed,
+        num_envs=args.num_envs,
+    )
+
+
+def _build_scheduler(
+    trainer: Trainer,
+    pool: OpponentPool,
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> EvalScheduler:
+    benchmarks = {
+        "vs_random": make_bench_vs_random(
+            env_factory=_env_factory,
+            n_games=args.eval_games,
+        ),
+    }
+    if not args.no_eval_heuristic:
+        benchmarks["vs_heuristic"] = make_bench_vs_heuristic(
+            env_factory=_env_factory,
+            n_games=args.eval_games,
+        )
+    if not args.no_eval_pool:
+        benchmarks["vs_pool"] = make_bench_vs_pool(
+            env_factory=_env_factory,
+            pool=pool,
+            n_games=args.eval_games,
+        )
+    return EvalScheduler(
+        trainer=trainer,
+        every_steps=args.eval_every,
+        benchmarks=benchmarks,
+        elo=EloTracker(),
+        ratings_path=output_dir / "elo.json",
+        archive_root=args.archive_dir,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.total_steps <= 0:
+        print(f"error: --total-steps must be positive (got {args.total_steps})", file=sys.stderr)
+        return 2
+    if args.num_envs <= 0:
+        print(f"error: --num-envs must be positive (got {args.num_envs})", file=sys.stderr)
+        return 2
+
+    output_dir = args.output_dir or Path("runs") / time.strftime("%Y%m%d_%H%M%S")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = output_dir / "tb"
+    snapshot_dir = output_dir / "snapshots"
+
+    cfg = _build_config(args)
+    (output_dir / "config.json").write_text(
+        json.dumps(_config_to_jsonable(cfg), indent=2)
+    )
+    print(f"[train] output_dir={output_dir}", flush=True)
+    print(f"[train] cfg={cfg}", flush=True)
+
+    torch.manual_seed(cfg.seed)
+    model = MLPPolicyValue(
+        obs_dim=OBS_SHAPE[0],
+        action_dim=ACTION_SPACE_SIZE,
+        hidden=cfg.hidden_sizes,
+    )
+    learner = PolicyAgent(model, ActionEncoder(_PLAYER_IDS))
+    pool = OpponentPool(rng=random.Random(cfg.seed))
+
+    vec_factory = None
+    if cfg.num_envs > 1:
+        vec_factory = (
+            heuristic_opponents_factory
+            if args.vec_opponents == "heuristic"
+            else random_opponents_factory
+        )
+
+    trainer = Trainer(
+        env_factory=_env_factory,
+        learner=learner,
+        opponent_pool=pool,
+        cfg=cfg,
+        log_dir=log_dir,
+        snapshot_dir=snapshot_dir,
+        vec_factory=vec_factory,
+    )
+    trainer.eval_scheduler = _build_scheduler(trainer, pool, output_dir, args)
+
+    t0 = time.time()
+    try:
+        trainer.train(total_steps=args.total_steps)
+    except KeyboardInterrupt:
+        print("\n[train] KeyboardInterrupt — saving final checkpoint and exiting", flush=True)
+    finally:
+        trainer.save_checkpoint(output_dir / "final.pt")
+    dt = time.time() - t0
+    steps_per_s = trainer.global_step / dt if dt > 0 else float("inf")
+    print(
+        f"[train] done: {trainer.global_step} steps in {dt:.1f}s "
+        f"({steps_per_s:.1f} steps/s) → {output_dir / 'final.pt'}",
+        flush=True,
+    )
+    return 0
+
+
+def _config_to_jsonable(cfg: TrainConfig) -> dict:
+    """Flatten ``TrainConfig`` to a JSON-friendly dict for the run record."""
+    return {
+        "ppo": {
+            "lr": cfg.ppo.lr,
+            "clip_range": cfg.ppo.clip_range,
+            "value_coef": cfg.ppo.value_coef,
+            "entropy_coef": cfg.ppo.entropy_coef,
+            "max_grad_norm": cfg.ppo.max_grad_norm,
+            "n_epochs": cfg.ppo.n_epochs,
+            "minibatch_size": cfg.ppo.minibatch_size,
+            "target_kl": cfg.ppo.target_kl,
+        },
+        "rollout_steps": cfg.rollout_steps,
+        "gamma": cfg.gamma,
+        "gae_lambda": cfg.gae_lambda,
+        "hidden_sizes": list(cfg.hidden_sizes),
+        "eval_every": cfg.eval_every,
+        "eval_n_games": cfg.eval_n_games,
+        "snapshot_every": cfg.snapshot_every,
+        "promote_every_n_snapshots": cfg.promote_every_n_snapshots,
+        "log_every": cfg.log_every,
+        "seed": cfg.seed,
+        "num_envs": cfg.num_envs,
+    }
+
+
+if __name__ == "__main__":
+    sys.exit(main())
