@@ -271,3 +271,77 @@ def test_sample_opponents_negative_raises() -> None:
     pool = OpponentPool(rng=random.Random(0))
     with pytest.raises(ValueError):
         pool.sample_opponents(learner, n=-1)
+
+
+# ----------------------------------------------------------------------
+# Baseline bucket
+# ----------------------------------------------------------------------
+
+
+def test_baselines_sampled_when_weight_set() -> None:
+    """With 100% baseline weight, every sample should be the provided baseline."""
+    from rl.agents.heuristic_agent import HeuristicAgent
+
+    learner = _make_learner()
+    baseline = HeuristicAgent()
+    pool = OpponentPool(
+        baselines=[baseline],
+        baseline_weight=1.0,
+        mix=(0.0, 0.0, 0.0),
+        rng=random.Random(0),
+    )
+    opps = pool.sample_opponents(learner, n=8)
+    assert all(o is baseline for o in opps), (
+        "baseline_weight=1.0 should always select the only baseline"
+    )
+
+
+def test_baseline_weight_zero_never_samples_baselines(tmp_path: Path) -> None:
+    """Default baseline_weight=0 keeps the old behaviour even if baselines passed."""
+    from rl.agents.heuristic_agent import HeuristicAgent
+
+    learner = _make_learner()
+    baseline = HeuristicAgent()
+    # Seed a recent checkpoint so the fallback chain doesn't reach baselines.
+    ckpt = tmp_path / "recent.pt"
+    _write_checkpoint(ckpt, seed=1)
+    pool = OpponentPool(
+        baselines=[baseline],
+        baseline_weight=0.0,
+        mix=(0.0, 1.0, 0.0),
+        rng=random.Random(0),
+    )
+    pool.add_checkpoint(ckpt)
+    opps = pool.sample_opponents(learner, n=8)
+    assert all(o is not baseline for o in opps)
+
+
+def test_baseline_weight_without_baselines_raises() -> None:
+    with pytest.raises(ValueError, match="baseline_weight > 0"):
+        OpponentPool(baseline_weight=0.5)
+
+
+def test_baseline_weight_negative_raises() -> None:
+    from rl.agents.heuristic_agent import HeuristicAgent
+
+    with pytest.raises(ValueError, match="non-negative"):
+        OpponentPool(baselines=[HeuristicAgent()], baseline_weight=-0.1)
+
+
+def test_baselines_used_as_fallback_when_other_buckets_empty() -> None:
+    """Empty recent/historical + non-empty baselines → baselines via fallback chain."""
+    from rl.agents.heuristic_agent import HeuristicAgent
+
+    learner = _make_learner()
+    baseline = HeuristicAgent()
+    # Mix asks for recent (which is empty), so it should fall through.
+    pool = OpponentPool(
+        baselines=[baseline],
+        baseline_weight=0.01,
+        mix=(0.0, 1.0, 0.0),  # roll-bucket = recent (empty)
+        rng=random.Random(0),
+    )
+    opps = pool.sample_opponents(learner, n=4)
+    # Fallback order is recent → historical → baseline → current. Recent and
+    # historical are empty, so baseline wins before the live-learner fallback.
+    assert all(o is baseline for o in opps)

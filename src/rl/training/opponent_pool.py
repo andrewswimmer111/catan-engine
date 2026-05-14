@@ -1,7 +1,7 @@
 """Self-play opponent pool — current learner + recent + historical checkpoints.
 
 The pool exists so the learner doesn't always play the same opponent. Each
-episode draws three opponents from a mix of three buckets:
+episode draws three opponents from a mix of four buckets:
 
 - **current**: the live learner itself, used in *stochastic-play* mode and
   under ``torch.no_grad`` so opponent forward passes don't accumulate
@@ -14,6 +14,13 @@ episode draws three opponents from a mix of three buckets:
   snapshots; it considers the most recent checkpoint as a candidate and
   applies classic reservoir sampling so the historical bucket remains a
   uniform random sample over all candidates ever considered.
+- **baseline** (optional): non-checkpoint agents such as
+  :class:`HeuristicAgent` provided at construction time. The baseline
+  bucket exists so cold-start training has competent opponents (heuristic
+  agents win games, producing the win/loss signal that pure cold-start
+  self-play lacks). Baselines are *not* cached by path — they're cheap to
+  reuse directly. Pass ``baseline_weight=0`` (the default) to keep the
+  old pure-self-play behaviour.
 
 Loaded opponents are :class:`PolicyAgent` instances with ``requires_grad=False``
 on every parameter and ``stochastic_play=True`` so they sample from the
@@ -46,6 +53,8 @@ class OpponentPool:
         recent_size: int = 8,
         historical_size: int = 32,
         mix: tuple[float, float, float] = (0.5, 0.3, 0.2),
+        baselines: list[Agent] | None = None,
+        baseline_weight: float = 0.0,
         rng: random.Random | None = None,
         *,
         cache_size: int = _DEFAULT_LRU_SIZE,
@@ -56,13 +65,32 @@ class OpponentPool:
             raise ValueError(f"historical_size must be positive, got {historical_size}")
         if any(w < 0 for w in mix):
             raise ValueError(f"mix weights must be non-negative, got {mix}")
-        total = sum(mix)
+        if baseline_weight < 0:
+            raise ValueError(
+                f"baseline_weight must be non-negative, got {baseline_weight}"
+            )
+        if baseline_weight > 0 and not baselines:
+            raise ValueError(
+                "baseline_weight > 0 but no baselines provided — pass at least "
+                "one Agent via baselines= or set baseline_weight=0"
+            )
+        total = sum(mix) + baseline_weight
         if total <= 0:
-            raise ValueError(f"mix weights must sum to a positive value, got {mix}")
+            raise ValueError(
+                f"weights must sum to a positive value, got mix={mix} "
+                f"baseline_weight={baseline_weight}"
+            )
         if cache_size <= 0:
             raise ValueError(f"cache_size must be positive, got {cache_size}")
 
-        self._mix = (mix[0] / total, mix[1] / total, mix[2] / total)
+        # 4-vector: (current, recent, historical, baseline) normalised.
+        self._mix = (
+            mix[0] / total,
+            mix[1] / total,
+            mix[2] / total,
+            baseline_weight / total,
+        )
+        self._baselines: list[Agent] = list(baselines or [])
         self._recent: deque[Path] = deque(maxlen=recent_size)
         self._historical: list[Path] = []
         self._historical_size = historical_size
@@ -87,7 +115,12 @@ class OpponentPool:
         return tuple(self._historical)
 
     @property
-    def mix(self) -> tuple[float, float, float]:
+    def baselines(self) -> tuple[Agent, ...]:
+        return tuple(self._baselines)
+
+    @property
+    def mix(self) -> tuple[float, float, float, float]:
+        """Normalised sampling weights ``(current, recent, historical, baseline)``."""
         return self._mix
 
     # ------------------------------------------------------------------
@@ -150,12 +183,18 @@ class OpponentPool:
             return self._load_frozen(self._rng.choice(list(self._recent)))
         if bucket == "historical" and self._historical:
             return self._load_frozen(self._rng.choice(self._historical))
-        # Fallback chain: recent → historical → current. Ensures the caller
-        # always gets a playable agent even when the rolled bucket is empty.
+        if bucket == "baseline" and self._baselines:
+            return self._rng.choice(self._baselines)
+        # Fallback chain: recent → historical → baseline → current. Ensures
+        # the caller always gets a playable agent even when the rolled
+        # bucket is empty. Baseline is preferred over live learner because
+        # a heuristic opponent is more informative than a self-clone.
         if self._recent:
             return self._load_frozen(self._rng.choice(list(self._recent)))
         if self._historical:
             return self._load_frozen(self._rng.choice(self._historical))
+        if self._baselines:
+            return self._rng.choice(self._baselines)
         return _live_learner_opponent(learner)
 
     def _choose_bucket(self) -> str:
@@ -164,7 +203,9 @@ class OpponentPool:
             return "current"
         if r < self._mix[0] + self._mix[1]:
             return "recent"
-        return "historical"
+        if r < self._mix[0] + self._mix[1] + self._mix[2]:
+            return "historical"
+        return "baseline"
 
     def _load_frozen(self, path: Path) -> PolicyAgent:
         key = Path(path)
