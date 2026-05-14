@@ -34,18 +34,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 
+from controller.agents import Agent
 from domain.ids import PlayerID
+from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.policy_agent import PolicyAgent
 from rl.encoding.action import ACTION_SPACE_SIZE, ActionEncoder
 from rl.encoding.observation import OBS_SHAPE
 from rl.env.catan_env import CatanEnv
+from rl.env.rewards import RewardFn, ShapedReward, SparseWinReward
 from rl.evaluation.elo import EloTracker
 from rl.evaluation.scheduler import (
     EvalScheduler,
@@ -66,8 +71,17 @@ from rl.training.vec_factories import (
 _PLAYER_IDS: list[PlayerID] = [PlayerID(i) for i in range(1, 5)]
 
 
-def _env_factory(seed: int) -> CatanEnv:
-    return CatanEnv(seed=seed)
+def _make_reward_fn(kind: str) -> RewardFn:
+    if kind == "shaped":
+        return ShapedReward()
+    return SparseWinReward()
+
+
+def _make_env_factory(reward_kind: str) -> Callable[[int], CatanEnv]:
+    """Build a seed→CatanEnv factory closing over the chosen reward kind."""
+    def factory(seed: int) -> CatanEnv:
+        return CatanEnv(seed=seed, reward_fn=_make_reward_fn(reward_kind))
+    return factory
 
 
 def _parse_hidden(spec: str) -> tuple[int, ...]:
@@ -198,6 +212,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional replay archive root (off by default)",
     )
 
+    # Reward shaping.
+    p.add_argument(
+        "--reward",
+        choices=("sparse", "shaped"),
+        default="sparse",
+        help="reward function for training and eval envs. sparse=±1 at terminal; "
+             "shaped adds vp_coef × Δvp per step + small turn penalty.",
+    )
+
+    # Heartbeat / watchdog.
+    p.add_argument(
+        "--print-every",
+        type=int,
+        default=50,
+        help="iterations between stdout heartbeat lines (0 to disable)",
+    )
+    p.add_argument(
+        "--watchdog-zero-wins-iters",
+        type=int,
+        default=0,
+        help="abort if rollout/wins is 0 for this many consecutive iterations "
+             "(0 = no watchdog). With cfg.rollout_steps=2048, 50 ≈ 100k env steps.",
+    )
+
+    # Pool baseline seeding.
+    p.add_argument(
+        "--pool-baselines",
+        type=int,
+        default=0,
+        help="seed the OpponentPool with this many HeuristicAgent instances. "
+             "Only active for --num-envs 1 (vec mode uses module-level factories).",
+    )
+    p.add_argument(
+        "--baseline-weight",
+        type=float,
+        default=0.4,
+        help="OpponentPool mix weight for the baseline bucket (default 0.4). "
+             "Ignored if --pool-baselines == 0.",
+    )
+
     return p
 
 
@@ -223,31 +277,59 @@ def _build_config(args: argparse.Namespace) -> TrainConfig:
         snapshot_every=args.snapshot_every,
         promote_every_n_snapshots=args.promote_every_n_snapshots,
         log_every=1,
+        print_every=args.print_every,
+        watchdog_zero_wins_iters=args.watchdog_zero_wins_iters,
         seed=args.seed,
         num_envs=args.num_envs,
+    )
+
+
+def _build_pool(args: argparse.Namespace) -> OpponentPool:
+    """Construct the OpponentPool, optionally seeded with heuristic baselines."""
+    rng = random.Random(args.seed)
+    baselines: list[Agent] = []
+    baseline_weight = 0.0
+    if args.pool_baselines > 0:
+        baselines = [HeuristicAgent() for _ in range(args.pool_baselines)]
+        baseline_weight = args.baseline_weight
+        if args.num_envs > 1:
+            # Vec workers run in subprocesses and can't reach the in-main-process
+            # pool. Warning rather than error because the user might still want
+            # the eval-side vs_pool benchmark to see baselines.
+            print(
+                "[train] warning: --pool-baselines set but --num-envs > 1; "
+                "vec rollout workers use module-level factories and won't "
+                "consult the pool. Baselines will only affect eval.",
+                file=sys.stderr,
+            )
+    return OpponentPool(
+        baselines=baselines,
+        baseline_weight=baseline_weight,
+        rng=rng,
     )
 
 
 def _build_scheduler(
     trainer: Trainer,
     pool: OpponentPool,
+    env_factory: Callable[[int], CatanEnv],
     output_dir: Path,
     args: argparse.Namespace,
 ) -> EvalScheduler:
     benchmarks = {
         "vs_random": make_bench_vs_random(
-            env_factory=_env_factory,
+            env_factory=env_factory,
             n_games=args.eval_games,
         ),
     }
     if not args.no_eval_heuristic:
         benchmarks["vs_heuristic"] = make_bench_vs_heuristic(
-            env_factory=_env_factory,
+            env_factory=env_factory,
             n_games=args.eval_games,
         )
     if not args.no_eval_pool:
         benchmarks["vs_pool"] = make_bench_vs_pool(
-            env_factory=_env_factory,
+            env_factory=env_factory,
             pool=pool,
             n_games=args.eval_games,
         )
@@ -277,10 +359,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = _build_config(args)
     (output_dir / "config.json").write_text(
-        json.dumps(_config_to_jsonable(cfg), indent=2)
+        json.dumps(_config_to_jsonable(cfg, args.reward), indent=2)
     )
     print(f"[train] output_dir={output_dir}", flush=True)
-    print(f"[train] cfg={cfg}", flush=True)
+    print(f"[train] cfg={cfg} reward={args.reward}", flush=True)
+
+    # Subprocess vec workers read the reward kind from this env var. Setting
+    # it before SubprocVecEnv.spawn() lets them pick up the same choice as
+    # the main-process env factory below.
+    os.environ["CATAN_RL_REWARD"] = args.reward
 
     torch.manual_seed(cfg.seed)
     model = MLPPolicyValue(
@@ -289,7 +376,8 @@ def main(argv: list[str] | None = None) -> int:
         hidden=cfg.hidden_sizes,
     )
     learner = PolicyAgent(model, ActionEncoder(_PLAYER_IDS))
-    pool = OpponentPool(rng=random.Random(cfg.seed))
+    pool = _build_pool(args)
+    env_factory = _make_env_factory(args.reward)
 
     vec_factory = None
     if cfg.num_envs > 1:
@@ -300,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     trainer = Trainer(
-        env_factory=_env_factory,
+        env_factory=env_factory,
         learner=learner,
         opponent_pool=pool,
         cfg=cfg,
@@ -308,7 +396,9 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_dir=snapshot_dir,
         vec_factory=vec_factory,
     )
-    trainer.eval_scheduler = _build_scheduler(trainer, pool, output_dir, args)
+    trainer.eval_scheduler = _build_scheduler(
+        trainer, pool, env_factory, output_dir, args
+    )
 
     t0 = time.time()
     try:
@@ -327,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _config_to_jsonable(cfg: TrainConfig) -> dict:
+def _config_to_jsonable(cfg: TrainConfig, reward_kind: str) -> dict:
     """Flatten ``TrainConfig`` to a JSON-friendly dict for the run record."""
     return {
         "ppo": {
@@ -349,8 +439,11 @@ def _config_to_jsonable(cfg: TrainConfig) -> dict:
         "snapshot_every": cfg.snapshot_every,
         "promote_every_n_snapshots": cfg.promote_every_n_snapshots,
         "log_every": cfg.log_every,
+        "print_every": cfg.print_every,
+        "watchdog_zero_wins_iters": cfg.watchdog_zero_wins_iters,
         "seed": cfg.seed,
         "num_envs": cfg.num_envs,
+        "reward": reward_kind,
     }
 
 
