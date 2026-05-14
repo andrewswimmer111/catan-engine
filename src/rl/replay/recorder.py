@@ -24,6 +24,7 @@ from domain.engine.player_view import make_player_view
 from domain.enums import EndReason
 from domain.ids import PlayerID
 from domain.rules.victory import compute_victory_points
+from rl.agents.heuristic_agent import heuristic_discard
 from rl.agents.policy_agent import PolicyAgent
 from rl.encoding.action import DiscardSentinel
 from rl.env.catan_env import CatanEnv
@@ -143,7 +144,6 @@ def _record_learner_step(
     step_out, action_dist = learner.act_with_dist(obs, mask, deterministic=False)
     decoded = learner.action_encoder.decode(step_out.action_idx, env.state)
     if isinstance(decoded, DiscardSentinel):
-        from rl.agents.heuristic_agent import heuristic_discard
         typed_action = heuristic_discard(env.state, decoded.player_id)
     else:
         typed_action = decoded
