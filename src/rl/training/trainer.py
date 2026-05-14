@@ -213,6 +213,7 @@ class Trainer:
     def train(self, total_steps: int) -> None:
         """Train until ``self.global_step`` reaches ``total_steps``."""
         last_eval_step = -self._cfg.eval_every  # force eval on first iter
+        zero_win_streak = 0
         try:
             while self._global_step < total_steps:
                 rollout_summary, bootstraps = self._collect_rollout_step()
@@ -223,6 +224,8 @@ class Trainer:
                 )
                 update_metrics = self._ppo_step()
                 self._log_iteration(rollout_summary, update_metrics)
+                self._maybe_print_heartbeat(rollout_summary, update_metrics)
+                zero_win_streak = self._check_watchdog(rollout_summary, zero_win_streak)
                 self._maybe_snapshot()
                 if self._eval_scheduler is not None:
                     self._eval_scheduler.maybe_run(self._global_step)
@@ -236,6 +239,59 @@ class Trainer:
             self._logger.flush()
         finally:
             self.close()
+
+    def _maybe_print_heartbeat(
+        self,
+        rollout_summary: dict[str, float],
+        update_metrics: dict[str, float],
+    ) -> None:
+        """One-line stdout summary every ``cfg.print_every`` iterations.
+
+        Catches "model not learning" cases without waiting for the next
+        eval cadence — much cheaper than scraping TB to find a flat curve.
+        """
+        if self._cfg.print_every <= 0:
+            return
+        if self._iteration % self._cfg.print_every != 0:
+            return
+        step_k = self._global_step / 1000.0
+        win_rate = rollout_summary.get("rollout/win_rate", 0.0)
+        ret_mean = rollout_summary.get("rollout/return_mean", 0.0)
+        episodes = int(rollout_summary.get("rollout/episodes", 0))
+        entropy = update_metrics.get("entropy", float("nan"))
+        kl = update_metrics.get("approx_kl", float("nan"))
+        print(
+            f"[train iter={self._iteration} step={step_k:.0f}k] "
+            f"win_rate={win_rate:.3f} ret_mean={ret_mean:+.3f} "
+            f"ep={episodes} entropy={entropy:.3f} kl={kl:.4f}",
+            flush=True,
+        )
+
+    def _check_watchdog(
+        self,
+        rollout_summary: dict[str, float],
+        zero_win_streak: int,
+    ) -> int:
+        """Track consecutive zero-win iterations; raise when threshold hit.
+
+        Returns the new streak length. Counter resets on any iteration that
+        recorded ≥1 learner win.
+        """
+        threshold = self._cfg.watchdog_zero_wins_iters
+        if threshold <= 0:
+            return 0
+        wins = int(rollout_summary.get("rollout/wins", 0))
+        if wins > 0:
+            return 0
+        zero_win_streak += 1
+        if zero_win_streak >= threshold:
+            raise RuntimeError(
+                f"watchdog: rollout/wins == 0 for {zero_win_streak} "
+                f"consecutive iterations (~{zero_win_streak * self._cfg.rollout_steps} "
+                "env steps). Likely a degenerate policy or sparse-reward "
+                "stalemate collapse — kill the run, change hyperparameters."
+            )
+        return zero_win_streak
 
     def close(self) -> None:
         """Tear down any subprocess vec env owned by the trainer.

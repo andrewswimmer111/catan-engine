@@ -25,7 +25,16 @@ class PPOConfig:
     lr: float = 3e-4
     clip_range: float = 0.2
     value_coef: float = 0.5
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.03
+    """Coefficient on the policy-entropy bonus.
+
+    Raised from the CleanRL-default 0.01 after the first overnight run
+    showed policy entropy collapsing from ~3.0 to ~0.6 within 1M env
+    steps in a 249-way action space — committing the policy to a
+    degenerate strategy before any winning trajectories had been seen.
+    0.03 keeps the policy noisier for longer so cold-start self-play has
+    time to discover wins. Sweep over {0.01, 0.03, 0.05} when tuning.
+    """
     max_grad_norm: float = 0.5
     n_epochs: int = 4
     minibatch_size: int = 256
@@ -61,6 +70,19 @@ class TrainConfig:
     """Number of recent snapshots between calls to
     :meth:`OpponentPool.promote_to_historical`."""
     log_every: int = 1
+    print_every: int = 0
+    """Print a one-line stdout summary every N iterations (0 = off).
+
+    Diagnostic heartbeat so a failing run can be spotted without firing up
+    TensorBoard — the first overnight wasted hours before the eval curves
+    revealed the policy had never won. Recommended: every ~100k env steps
+    (e.g. ``print_every=50`` at ``rollout_steps=2048``)."""
+    watchdog_zero_wins_iters: int = 0
+    """If > 0, abort with ``RuntimeError`` when ``rollout/wins`` has been 0
+    for this many consecutive iterations.
+
+    Pairs with ``print_every`` — together they convert a wasted overnight
+    into a quick failure. 0 disables the watchdog."""
     seed: int = 0
     num_envs: int = 1
     """Parallel rollout envs. ``1`` is the single-process
@@ -80,7 +102,7 @@ DEFAULT_BASELINE_CONFIG: TrainConfig = TrainConfig(
         lr=3e-4,
         clip_range=0.2,
         value_coef=0.5,
-        entropy_coef=0.01,
+        entropy_coef=0.03,
         max_grad_norm=0.5,
         n_epochs=4,
         minibatch_size=256,

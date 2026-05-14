@@ -269,6 +269,75 @@ def test_trainer_rejects_vec_config_without_factory() -> None:
         )
 
 
+def test_trainer_heartbeat_prints_to_stdout(tmp_path: Path, capsys) -> None:
+    """``print_every > 0`` should emit a heartbeat line each Nth iteration."""
+    learner = _make_learner()
+    cfg = TrainConfig(
+        ppo=PPOConfig(n_epochs=1, minibatch_size=32, target_kl=None),
+        rollout_steps=64,
+        eval_every=0,
+        log_every=1,
+        print_every=1,
+        seed=30,
+    )
+    trainer = Trainer(
+        env_factory=_env_factory,
+        learner=learner,
+        opponent_pool=_make_pool(seed=30),
+        cfg=cfg,
+        log_dir=None,
+    )
+    trainer.train(total_steps=128)
+    out = capsys.readouterr().out
+    assert "[train iter=" in out, "expected heartbeat lines on stdout"
+    assert "win_rate=" in out and "entropy=" in out
+
+
+def test_trainer_watchdog_raises_on_zero_wins(tmp_path: Path) -> None:
+    """When zero-win streak hits threshold, train() must raise.
+
+    Forcing zero wins is hard with a real env; we monkey-patch _collect_rollout_step
+    to always return a summary with rollout/wins=0.
+    """
+    learner = _make_learner()
+    cfg = TrainConfig(
+        ppo=PPOConfig(n_epochs=1, minibatch_size=32, target_kl=None),
+        rollout_steps=64,
+        eval_every=0,
+        log_every=1,
+        watchdog_zero_wins_iters=3,
+        seed=31,
+    )
+    trainer = Trainer(
+        env_factory=_env_factory,
+        learner=learner,
+        opponent_pool=_make_pool(seed=31),
+        cfg=cfg,
+        log_dir=None,
+    )
+
+    fake_summary = {
+        "rollout/wins": 0.0,
+        "rollout/losses": 0.0,
+        "rollout/episodes": 1.0,
+        "rollout/steps": float(cfg.rollout_steps),
+    }
+
+    def fake_collect():
+        # Pretend we collected rollout_steps with 0 wins.
+        trainer._global_step += cfg.rollout_steps
+        # Buffer needs at least one transition for ppo_step to run cleanly;
+        # but watchdog fires before that has consequences across iterations.
+        # The trainer also computes advantages on whatever is in the buffer —
+        # we leave it empty and rely on ppo_step's len==0 early-return.
+        trainer._buffer.clear()
+        return fake_summary, {PLAYER_IDS[0]: 0.0}
+
+    trainer._collect_rollout_step = fake_collect  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="rollout/wins == 0"):
+        trainer.train(total_steps=10_000_000)
+
+
 @pytest.mark.nightly
 def test_trainer_long_run_smoke(tmp_path: Path) -> None:
     """Spec-aligned: 5000 env steps, no exceptions, finite metrics."""
