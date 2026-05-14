@@ -181,6 +181,94 @@ def test_self_play_snapshots_grow_the_pool(tmp_path: Path) -> None:
     assert len(pool.historical_paths) >= 1
 
 
+def test_trainer_eval_scheduler_replaces_internal_evaluate(tmp_path: Path) -> None:
+    """When ``eval_scheduler`` is set the trainer should fire it instead of ``_evaluate``."""
+    from rl.evaluation.scheduler import EvalScheduler, make_bench_vs_random
+
+    learner = _make_learner()
+    cfg = TrainConfig(
+        ppo=PPOConfig(n_epochs=1, minibatch_size=32, target_kl=None),
+        rollout_steps=64,
+        eval_every=64,           # cadence on the scheduler, not on _evaluate
+        eval_n_games=2,
+        log_every=1,
+        seed=10,
+    )
+    trainer = Trainer(
+        env_factory=_env_factory,
+        learner=learner,
+        opponent_pool=_make_pool(seed=10),
+        cfg=cfg,
+        log_dir=None,
+    )
+
+    fire_count = {"n": 0}
+    real_maybe_run = EvalScheduler.maybe_run
+
+    def counting_maybe_run(self: EvalScheduler, step: int):
+        fire_count["n"] += 1
+        return real_maybe_run(self, step)
+
+    scheduler = EvalScheduler(
+        trainer=trainer,
+        every_steps=64,
+        benchmarks={
+            "vs_random": make_bench_vs_random(_env_factory, n_games=2),
+        },
+    )
+    trainer.eval_scheduler = scheduler
+    # Patch on the instance to count invocations without breaking other tests.
+    scheduler.maybe_run = counting_maybe_run.__get__(scheduler, EvalScheduler)  # type: ignore[method-assign]
+    trainer.train(total_steps=128)
+    assert fire_count["n"] >= 1, "scheduler.maybe_run was never invoked"
+
+
+@pytest.mark.slow
+def test_trainer_vec_path_runs(tmp_path: Path) -> None:
+    """``cfg.num_envs > 1`` switches to SubprocVecEnv + VecRolloutWorker."""
+    from rl.training.vec_factories import random_opponents_factory
+
+    learner = _make_learner()
+    cfg = TrainConfig(
+        ppo=PPOConfig(n_epochs=1, minibatch_size=32, target_kl=None),
+        rollout_steps=64,
+        eval_every=0,
+        log_every=1,
+        seed=20,
+        num_envs=2,
+    )
+    trainer = Trainer(
+        env_factory=_env_factory,
+        learner=learner,
+        opponent_pool=_make_pool(seed=20),
+        cfg=cfg,
+        log_dir=None,
+        vec_factory=random_opponents_factory,
+    )
+    trainer.train(total_steps=128)
+    assert trainer.global_step >= 128
+
+
+def test_trainer_rejects_vec_config_without_factory() -> None:
+    """``cfg.num_envs > 1`` without a ``vec_factory`` should raise."""
+    learner = _make_learner()
+    cfg = TrainConfig(
+        ppo=PPOConfig(n_epochs=1, minibatch_size=32, target_kl=None),
+        rollout_steps=64,
+        eval_every=0,
+        log_every=1,
+        seed=21,
+        num_envs=2,
+    )
+    with pytest.raises(ValueError, match="requires a vec_factory"):
+        Trainer(
+            env_factory=_env_factory,
+            learner=learner,
+            opponent_pool=_make_pool(seed=21),
+            cfg=cfg,
+        )
+
+
 @pytest.mark.nightly
 def test_trainer_long_run_smoke(tmp_path: Path) -> None:
     """Spec-aligned: 5000 env steps, no exceptions, finite metrics."""

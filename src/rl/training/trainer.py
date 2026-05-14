@@ -40,6 +40,33 @@ hands the entire rollout as a single :class:`TrajectoryBatch` to
 :func:`ppo_update`, which does its own shuffled minibatching internally.
 Because opponents aren't stored, every transition in the buffer belongs
 to the learner — no per-seat filtering is needed.
+
+Vectorised rollouts
+-------------------
+
+Setting ``cfg.num_envs > 1`` switches the rollout from one in-process
+:class:`RolloutWorker` to a :class:`SubprocVecEnv` of that many parallel
+workers driven by a :class:`VecRolloutWorker`. The vec env is built lazily
+on the first iteration and reused — subprocess spawn is expensive so we
+pay it once. Each subprocess gets its opponent setup and learner seat
+from the ``vec_factory`` callable (see :mod:`rl.training.vec_factories`),
+which derives the seat from its incoming seed; with ``num_envs >= 4``
+the four seats are exercised in parallel.
+
+The vec path **does not** consult :class:`OpponentPool` for opponents —
+the pool lives in the main process and pool-loaded agents aren't
+picklable across the subprocess boundary. Snapshots are still written
+into the pool so a downstream single-env eval / replay step can see
+them, but opponent diversity in vec mode comes from the factory.
+
+Eval
+----
+
+If ``eval_scheduler`` is set (via the constructor arg or the property),
+the trainer calls ``scheduler.maybe_run(global_step)`` after every
+iteration and skips its built-in vs-random ``_evaluate``. The scheduler
+owns its cadence (``every_steps``), benchmark mix, Elo state, and replay
+archive — the trainer is just the clock.
 """
 
 from __future__ import annotations
@@ -48,7 +75,7 @@ import random
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import torch
 
@@ -70,7 +97,14 @@ from rl.training.config import TrainConfig
 from rl.training.opponent_pool import OpponentPool
 from rl.training.ppo import ppo_update
 from rl.training.rollout import RolloutWorker
+from rl.training.vec_env import SubprocVecEnv, VecEnvFactory
+from rl.training.vec_rollout import VecRolloutWorker
 from rl.utils.logging import NoOpLogger, TBLogger, make_logger
+
+if TYPE_CHECKING:
+    # rl.evaluation.scheduler imports Trainer at module level, so we avoid the
+    # cycle by referring to it only under TYPE_CHECKING here.
+    from rl.evaluation.scheduler import EvalScheduler
 
 __all__ = ["Trainer"]
 
@@ -86,11 +120,20 @@ class Trainer:
         cfg: TrainConfig,
         log_dir: str | Path | None = None,
         snapshot_dir: str | Path | None = None,
+        vec_factory: VecEnvFactory | None = None,
+        eval_scheduler: "EvalScheduler | None" = None,
     ) -> None:
+        if cfg.num_envs > 1 and vec_factory is None:
+            raise ValueError(
+                f"cfg.num_envs={cfg.num_envs} requires a vec_factory; pass "
+                "rl.training.vec_factories.random_opponents_factory or a custom one"
+            )
         self._env_factory = env_factory
         self._learner = learner
         self._opponent_pool = opponent_pool
         self._cfg = cfg
+        self._vec_factory = vec_factory
+        self._eval_scheduler: "EvalScheduler | None" = eval_scheduler
 
         # Discover player seats by spinning up a throwaway env. Re-using the
         # factory here keeps "what seats exist" out of TrainConfig.
@@ -123,6 +166,12 @@ class Trainer:
             hidden=tuple(learner.model.hidden),
         )
 
+        # Vec-env path is constructed lazily on the first rollout so a Trainer
+        # with cfg.num_envs > 1 doesn't spawn subprocesses just by being created
+        # (matters for tests that build a trainer to inspect config).
+        self._vec_env: SubprocVecEnv | None = None
+        self._vec_worker: VecRolloutWorker | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -147,23 +196,57 @@ class Trainer:
     def logger(self) -> TBLogger | NoOpLogger:
         return self._logger
 
+    @property
+    def eval_scheduler(self) -> "EvalScheduler | None":
+        return self._eval_scheduler
+
+    @eval_scheduler.setter
+    def eval_scheduler(self, scheduler: "EvalScheduler | None") -> None:
+        """Hand the trainer an :class:`EvalScheduler` to drive in-training eval.
+
+        When set, the trainer calls ``scheduler.maybe_run(global_step)`` after
+        every iteration and skips its built-in ``_evaluate`` (vs-random only).
+        The scheduler owns its own cadence via ``every_steps``.
+        """
+        self._eval_scheduler = scheduler
+
     def train(self, total_steps: int) -> None:
         """Train until ``self.global_step`` reaches ``total_steps``."""
         last_eval_step = -self._cfg.eval_every  # force eval on first iter
-        while self._global_step < total_steps:
-            rollout_summary, last_worker = self._collect_rollout()
-            self._compute_advantages(last_worker)
-            update_metrics = self._ppo_step()
-            self._log_iteration(rollout_summary, update_metrics)
-            self._maybe_snapshot()
-            if (
-                self._cfg.eval_every > 0
-                and self._global_step - last_eval_step >= self._cfg.eval_every
-            ):
-                self._evaluate()
-                last_eval_step = self._global_step
-            self._iteration += 1
-        self._logger.flush()
+        try:
+            while self._global_step < total_steps:
+                rollout_summary, bootstraps = self._collect_rollout_step()
+                self._buffer.compute_advantages(
+                    gamma=self._cfg.gamma,
+                    lam=self._cfg.gae_lambda,
+                    last_values=bootstraps,
+                )
+                update_metrics = self._ppo_step()
+                self._log_iteration(rollout_summary, update_metrics)
+                self._maybe_snapshot()
+                if self._eval_scheduler is not None:
+                    self._eval_scheduler.maybe_run(self._global_step)
+                elif (
+                    self._cfg.eval_every > 0
+                    and self._global_step - last_eval_step >= self._cfg.eval_every
+                ):
+                    self._evaluate()
+                    last_eval_step = self._global_step
+                self._iteration += 1
+            self._logger.flush()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Tear down any subprocess vec env owned by the trainer.
+
+        Safe to call repeatedly. ``train()`` calls this in a ``finally`` so
+        subprocesses are reaped even when training raises.
+        """
+        if self._vec_env is not None:
+            self._vec_env.close()
+            self._vec_env = None
+            self._vec_worker = None
 
     def save_checkpoint(self, path: str | Path) -> None:
         """Write a versioned :class:`CheckpointMeta`-tagged checkpoint to ``path``."""
@@ -173,7 +256,22 @@ class Trainer:
     # Rollout
     # ------------------------------------------------------------------
 
-    def _collect_rollout(self) -> tuple[dict[str, float], RolloutWorker]:
+    def _collect_rollout_step(
+        self,
+    ) -> tuple[dict[str, float], dict[PlayerID, float]]:
+        """Dispatch to the single- or vec-env rollout collector.
+
+        Returns ``(summary, bootstraps)`` where ``summary`` is a flat scalar
+        dict for TB and ``bootstraps`` is the ``{seat: V(s_T)}`` mapping fed
+        to :meth:`TrajectoryBuffer.compute_advantages`.
+        """
+        if self._cfg.num_envs > 1:
+            return self._collect_rollout_vec()
+        return self._collect_rollout_single()
+
+    def _collect_rollout_single(
+        self,
+    ) -> tuple[dict[str, float], dict[PlayerID, float]]:
         """Collect ``cfg.rollout_steps`` learner transitions into the buffer.
 
         New env, new opponent assignment, and new learner seat per episode —
@@ -218,7 +316,7 @@ class Trainer:
                 break
 
         if last_worker is None:
-            raise RuntimeError("_collect_rollout produced no worker")
+            raise RuntimeError("_collect_rollout_single produced no worker")
 
         summary = {
             "rollout/episodes": agg["episodes"],
@@ -237,17 +335,67 @@ class Trainer:
             summary["rollout/return_mean"] = sum(all_returns) / len(all_returns)
             summary["rollout/return_max"] = max(all_returns)
             summary["rollout/return_min"] = min(all_returns)
-        return summary, last_worker
+        return summary, {last_worker.learner_seat: last_worker.last_bootstrap_value}
 
-    def _compute_advantages(self, last_worker: RolloutWorker) -> None:
-        bootstrap: dict[PlayerID, float] = {
-            last_worker.learner_seat: last_worker.last_bootstrap_value
+    def _collect_rollout_vec(
+        self,
+    ) -> tuple[dict[str, float], dict[PlayerID, float]]:
+        """Vec-env rollout: ``cfg.num_envs`` parallel subprocesses, one buffer.
+
+        The :class:`SubprocVecEnv` is spawned lazily on first call and reused
+        across iterations — subprocess startup is the dominant cost in the
+        vec path, so we pay it once. Opponents are fixed at spawn time by the
+        ``vec_factory``; in-training opponent diversity comes from the
+        per-seed seat rotation baked into the shipped factories, not from
+        :class:`OpponentPool` (which the vec workers can't see across the
+        process boundary).
+        """
+        self._buffer.clear()
+        steps_before = self._global_step
+
+        if self._vec_worker is None:
+            assert self._vec_factory is not None  # validated in __init__
+            self._vec_env = SubprocVecEnv(
+                factory=self._vec_factory,
+                num_envs=self._cfg.num_envs,
+                base_seed=self._seed_counter,
+            )
+            # Mirror the seat assignment the factory uses (seed % 4 + 1) so
+            # the buffer's per-agent GAE walks each env's subsequence under
+            # the correct seat key.
+            learner_seats = [
+                self._player_ids[(self._seed_counter + i) % len(self._player_ids)]
+                for i in range(self._cfg.num_envs)
+            ]
+            self._vec_worker = VecRolloutWorker(
+                vec_env=self._vec_env,
+                learner=self._learner,
+                buffer=self._buffer,
+                learner_seats=learner_seats,
+            )
+
+        stats = self._vec_worker.collect(self._cfg.rollout_steps)
+        self._global_step += stats.learner_steps
+        # Bump the seed counter by the number of envs so a subsequent
+        # close-and-respawn (e.g. tests) lands on a fresh seed window.
+        self._seed_counter += self._cfg.num_envs
+
+        summary: dict[str, float] = {
+            "rollout/episodes": float(stats.episodes_completed),
+            "rollout/wins": float(stats.learner_wins),
+            "rollout/losses": float(stats.learner_losses),
+            "rollout/stalemates": float(stats.stalemates),
+            "rollout/steps": float(self._global_step - steps_before),
+            "pool/recent_size": float(len(self._opponent_pool.recent_paths)),
+            "pool/historical_size": float(
+                len(self._opponent_pool.historical_paths)
+            ),
         }
-        self._buffer.compute_advantages(
-            gamma=self._cfg.gamma,
-            lam=self._cfg.gae_lambda,
-            last_values=bootstrap,
-        )
+        if stats.episodes_completed > 0:
+            summary["rollout/win_rate"] = (
+                stats.learner_wins / stats.episodes_completed
+            )
+        return summary, self._vec_worker.last_bootstrap_values
 
     # ------------------------------------------------------------------
     # Update
