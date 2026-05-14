@@ -5,6 +5,7 @@ import random
 
 import pytest
 
+from controller.agents import Agent
 from controller.session import GameSnapshot
 from domain.actions import all_actions as A
 from domain.engine.game_engine import GameEngine
@@ -29,26 +30,23 @@ def _env_factory(seed: int) -> CatanEnv:
     return CatanEnv(seed=seed)
 
 
-def _mixed_agents(seed: int) -> dict[PlayerID, object]:
+def _mixed_agents(seed: int) -> dict[PlayerID, Agent]:
     """One heuristic seat; the rest are RandomAgents that skip trade proposals
     so games don't burn wall-clock in unconverted trade flows."""
     rng = random.Random(seed)
-    agents: dict[PlayerID, object] = {}
+    agents: dict[PlayerID, Agent] = {}
     for pid in PLAYER_IDS:
-        sub = random.Random(rng.randrange(2**32))
         if pid == HEUR_SEAT:
-            agents[pid] = HeuristicAgent(sub)
+            agents[pid] = HeuristicAgent()
         else:
-            agents[pid] = RandomAgent(sub, skip_proposals=True)
+            agents[pid] = RandomAgent(
+                random.Random(rng.randrange(2**32)), skip_proposals=True
+            )
     return agents
 
 
-def _all_heuristic(seed: int) -> dict[PlayerID, HeuristicAgent]:
-    rng = random.Random(seed)
-    return {
-        pid: HeuristicAgent(random.Random(rng.randrange(2**32)))
-        for pid in PLAYER_IDS
-    }
+def _all_heuristic() -> dict[PlayerID, Agent]:
+    return {pid: HeuristicAgent() for pid in PLAYER_IDS}
 
 
 # ----------------------------------------------------------------------
@@ -64,7 +62,7 @@ def test_setup_settlement_picks_max_pip_vertex():
     settlements = [a for a in legal if isinstance(a, A.PlaceSettlementAction)]
     best_pip = max(vertex_pip_count(state, a.vertex_id) for a in settlements)
 
-    agent = HeuristicAgent(random.Random(0))
+    agent = HeuristicAgent()
     snap = GameSnapshot(state=state, step_index=0, last_action=None, last_events=())
     pick = agent.choose(snap, legal)
 
@@ -180,7 +178,7 @@ def test_heuristic_self_play_is_seat_symmetric():
     error from 100 games.
     """
     t = Tournament(_env_factory)
-    result = t.play(_all_heuristic(seed=99), n_games=100, base_seed=500)
+    result = t.play(_all_heuristic(), n_games=100, base_seed=500)
 
     vps = [result.mean_vp[pid] for pid in PLAYER_IDS]
     spread = max(vps) - min(vps)

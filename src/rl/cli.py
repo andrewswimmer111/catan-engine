@@ -273,7 +273,7 @@ def _resolve_opponent(spec: str) -> tuple[_AgentFactory, str]:
     if spec == "random":
         return lambda rng: RandomAgent(rng, skip_proposals=True), "random"
     if spec == "heuristic":
-        return lambda rng: HeuristicAgent(rng), "heuristic"
+        return lambda _rng: HeuristicAgent(), "heuristic"
 
     path = Path(spec)
     if not path.exists():

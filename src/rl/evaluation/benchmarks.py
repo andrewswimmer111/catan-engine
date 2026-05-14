@@ -60,7 +60,7 @@ def bench_heuristic_vs_random(
     agents: dict[PlayerID, Agent] = {}
     for pid in DEFAULT_PLAYER_IDS:
         if pid == heur_seat:
-            agents[pid] = HeuristicAgent(next_rng())
+            agents[pid] = HeuristicAgent()
         else:
             agents[pid] = RandomAgent(next_rng(), skip_proposals=skip_proposals)
     return Tournament(_env_factory).play(agents, n_games=n_games, base_seed=base_seed)
@@ -69,6 +69,5 @@ def bench_heuristic_vs_random(
 def bench_heuristic_vs_heuristic(
     n_games: int = 50, base_seed: int = 0
 ) -> TournamentResult:
-    next_rng = _split_rng(base_seed)
-    agents: dict[PlayerID, Agent] = {pid: HeuristicAgent(next_rng()) for pid in DEFAULT_PLAYER_IDS}
+    agents: dict[PlayerID, Agent] = {pid: HeuristicAgent() for pid in DEFAULT_PLAYER_IDS}
     return Tournament(_env_factory).play(agents, n_games=n_games, base_seed=base_seed)

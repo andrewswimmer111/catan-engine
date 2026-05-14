@@ -256,7 +256,7 @@ def make_bench_vs_heuristic(
     def bench(learner: PolicyAgent) -> TournamentResult:
         agents = _learner_plus_three(
             learner,
-            opponent_factory=lambda rng: HeuristicAgent(rng),
+            opponent_factory=lambda _rng: HeuristicAgent(),
             seed=base_seed,
         )
         return Tournament(env_factory).play(

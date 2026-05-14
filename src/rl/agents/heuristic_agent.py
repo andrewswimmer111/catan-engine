@@ -8,8 +8,6 @@ sentinel without instantiating an agent.
 
 from __future__ import annotations
 
-import random
-
 from controller.session import GameSnapshot
 from domain.actions import all_actions as A
 from domain.actions.base import Action
@@ -39,8 +37,11 @@ def heuristic_discard(
 
 
 class HeuristicAgent:
-    def __init__(self, rng: random.Random) -> None:
-        self._rng = rng
+    """Deterministic rule-based agent.
+
+    Takes no constructor arguments — every tie is broken by a stable rule
+    (lowest id, highest pip, etc.), so an RNG would be unused state.
+    """
 
     def choose(self, snap: GameSnapshot, legal: list[Action]) -> Action | None:
         if not legal:
