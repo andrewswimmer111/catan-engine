@@ -14,9 +14,12 @@ Two concrete reward fns ship here:
   handling the multi-agent credit assignment.
 - :class:`ShapedReward` — a denser signal for early bring-up:
   ``vp_coef × Δvp + turn_tick`` per step (using ``victory_points_public`` so
-  hidden VP cards never leak), plus ``±win_bonus`` at the terminal step.
-  Stalemate terminals reward 0 for everyone — log ``state.end_reason`` to
-  decide whether to keep the trajectory.
+  hidden VP cards never leak), plus ``±win_bonus`` at the terminal step
+  and ``-stalemate_penalty`` for everyone if the game stalemates. The
+  stalemate penalty exists because, without it, a learner that accumulates
+  even a small amount of shaping (e.g. from setup-phase settlements) finds
+  "stall the game out" strictly better than "play and risk a loss" — a
+  classic shaped-reward attractor that breaks training.
 
 Per-seat credit decomposes into three orthogonal channels:
 
@@ -147,19 +150,21 @@ class SparseWinReward:
 
 
 class ShapedReward:
-    """VP-delta shaping with a small turn tick and a terminal win/loss bonus.
+    """VP-delta shaping with a small turn tick, terminal win/loss bonus, and stalemate penalty.
 
     Per-step reward:
         ``vp_coef × Δ victory_points_public(agent) + turn_tick``
 
-    Terminal additions:
+    Terminal additions (added on the step that flips the game terminal):
         ``+ win_bonus`` if ``agent`` won, ``- win_bonus`` if a different seat
-        won. Stalemate terminals reward 0 across the board (the shaping signal
-        is also dropped on the stalemate step so the trajectory ends cleanly
-        at zero).
+        won, ``- stalemate_penalty`` if the game stalemated. The stalemate
+        penalty matters more than it might look: with ``stalemate_penalty=0``
+        a learner with positive cumulative shaping from setup builds finds
+        stalling strictly better than playing — see module docstring.
 
-    Defaults (``vp_coef=0.05``, ``turn_tick=-0.001``, ``win_bonus=1.0``) are
-    rough early-bring-up values; tune per training run.
+    Defaults (``vp_coef=0.05``, ``turn_tick=-0.001``, ``win_bonus=1.0``,
+    ``stalemate_penalty=0.5``) are rough early-bring-up values. Set
+    ``stalemate_penalty=0.0`` to reproduce the pre-penalty behaviour.
     """
 
     def __init__(
@@ -167,10 +172,16 @@ class ShapedReward:
         vp_coef: float = 0.05,
         turn_tick: float = -0.001,
         win_bonus: float = 1.0,
+        stalemate_penalty: float = 0.5,
     ) -> None:
+        if stalemate_penalty < 0:
+            raise ValueError(
+                f"stalemate_penalty must be non-negative, got {stalemate_penalty}"
+            )
         self.vp_coef = vp_coef
         self.turn_tick = turn_tick
         self.win_bonus = win_bonus
+        self.stalemate_penalty = stalemate_penalty
 
     def step_reward(
         self,
@@ -180,7 +191,10 @@ class ShapedReward:
         agent: PlayerID,
     ) -> float:
         if _is_stalemate(result):
-            return 0.0
+            # Stalemate short-circuits shaping (matching the pre-penalty
+            # contract) but applies the flat per-seat penalty so the
+            # "stall to keep accumulated shaping" attractor is broken.
+            return -self.stalemate_penalty
 
         prev_vp = _vp_public(prev_state, agent)
         new_vp = _vp_public(result.state, agent)
@@ -227,7 +241,14 @@ class ShapedReward:
     def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]:
         winner = final_state.winner
         if winner is None:
-            return {pid: 0.0 for pid in final_state.config.player_ids}
+            # Stalemate — penalty applied to every seat. The rollout
+            # worker writes this to each non-acting seat's last
+            # transition; the acting seat at terminal already received
+            # the same -stalemate_penalty via step_reward.
+            return {
+                pid: -self.stalemate_penalty
+                for pid in final_state.config.player_ids
+            }
         return {
             pid: (self.win_bonus if pid == winner else -self.win_bonus)
             for pid in final_state.config.player_ids

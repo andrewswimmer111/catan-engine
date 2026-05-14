@@ -270,12 +270,13 @@ def test_shaped_cross_step_rewards_empty_on_stalemate() -> None:
     )
 
 
-def test_shaped_zero_on_stalemate_for_everyone() -> None:
+def test_shaped_stalemate_penalty_default() -> None:
+    """With default penalty=0.5, stalemate step_reward is -0.5 for every seat."""
     state = _fresh_state(seed=0)
     pids = _player_ids(state)
 
     terminal = _terminal_state(state, winner=None)
-    # Even if a VP changed on the same step, stalemate flattens to zero.
+    # Even if a VP changed on the same step, stalemate flattens shaping.
     terminal.players[pids[0]].victory_points_public = (
         state.players[pids[0]].victory_points_public + 1
     )
@@ -285,7 +286,42 @@ def test_shaped_zero_on_stalemate_for_everyone() -> None:
 
     fn = ShapedReward(vp_coef=0.05, turn_tick=-0.001, win_bonus=1.0)
     for pid in pids:
+        assert fn.step_reward(state, result.action, result, pid) == pytest.approx(-0.5)
+
+
+def test_shaped_stalemate_penalty_zero_reproduces_old_behavior() -> None:
+    """Setting penalty=0 reverts to the pre-penalty contract (zero everywhere)."""
+    state = _fresh_state(seed=0)
+    pids = _player_ids(state)
+
+    terminal = _terminal_state(state, winner=None)
+    result = _make_step_result(
+        terminal, events=[GameStalled(turn_number=99, reason=EndReason.STALEMATE_VP_STALL)]
+    )
+
+    fn = ShapedReward(
+        vp_coef=0.05, turn_tick=-0.001, win_bonus=1.0, stalemate_penalty=0.0
+    )
+    for pid in pids:
         assert fn.step_reward(state, result.action, result, pid) == 0.0
+
+
+def test_shaped_stalemate_terminal_rewards_penalize_all_seats() -> None:
+    """``terminal_rewards`` must mirror ``step_reward`` for non-acting seats."""
+    state = _fresh_state(seed=0)
+    pids = _player_ids(state)
+    terminal = _terminal_state(state, winner=None)
+
+    fn = ShapedReward(stalemate_penalty=0.75)
+    payouts = fn.terminal_rewards(terminal)
+    assert set(payouts.keys()) == set(pids)
+    for pid in pids:
+        assert payouts[pid] == pytest.approx(-0.75)
+
+
+def test_shaped_negative_stalemate_penalty_rejected() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        ShapedReward(stalemate_penalty=-0.1)
 
 
 # ---------------------------------------------------------------------------
