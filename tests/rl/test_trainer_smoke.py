@@ -181,7 +181,7 @@ def test_self_play_snapshots_grow_the_pool(tmp_path: Path) -> None:
     assert len(pool.historical_paths) >= 1
 
 
-@pytest.mark.slow
+@pytest.mark.nightly
 def test_trainer_long_run_smoke(tmp_path: Path) -> None:
     """Spec-aligned: 5000 env steps, no exceptions, finite metrics."""
     learner = _make_learner()
@@ -203,7 +203,7 @@ def test_trainer_long_run_smoke(tmp_path: Path) -> None:
     assert trainer.global_step >= 5000
 
 
-@pytest.mark.slow
+@pytest.mark.nightly
 def test_self_play_50k_steps_pool_grows(tmp_path: Path) -> None:
     """rl-018 acceptance: 50k self-play steps; pool grows; final policy plays."""
     learner = _make_learner()

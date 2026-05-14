@@ -44,7 +44,7 @@ def test_same_seed_reproduces_same_games():
 
 
 # ----------------------------------------------------------------------
-# Slow (regression checks)
+# Slow / nightly (regression checks — ``nightly`` if routinely ~30s+ wall time)
 # ----------------------------------------------------------------------
 
 
@@ -79,7 +79,7 @@ def test_bench_heuristic_vs_random_dominance():
     assert heur_vp > 2 * best_random_vp, result.mean_vp
 
 
-@pytest.mark.slow
+@pytest.mark.nightly
 def test_bench_heuristic_vs_heuristic_seat_symmetry():
     """4 heuristics play symmetric games: per-seat mean VP stays within 2.0.
 

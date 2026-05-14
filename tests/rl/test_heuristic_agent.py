@@ -143,7 +143,7 @@ def test_smoke_heuristic_outscores_randoms_in_three_games():
 
 
 # ----------------------------------------------------------------------
-# Slow (regression checks — run with `pytest -m slow`)
+# Slow / nightly (regression checks — ``nightly`` if routinely ~30s+ wall time)
 # ----------------------------------------------------------------------
 
 
@@ -168,7 +168,7 @@ def test_heuristic_dominates_random_over_30_games():
     assert heur_vp > 2 * best_random_vp, result.mean_vp
 
 
-@pytest.mark.slow
+@pytest.mark.nightly
 def test_heuristic_self_play_is_seat_symmetric():
     """4 heuristic agents: each seat's mean VP stays within 2.0 of the others.
 

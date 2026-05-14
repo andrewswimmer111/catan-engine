@@ -79,7 +79,7 @@ def test_smoke_no_crash_across_seeds() -> None:
                 break
 
 
-@pytest.mark.slow
+@pytest.mark.nightly
 def test_smoke_game_reaches_terminal() -> None:
     """One seeded game must reach a terminal state (VP stall triggers by turn 1500)."""
     env = CatanEnv(seed=2)
