@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Callable
 
+from controller.agents import Agent
 from controller.session import GameSnapshot
 from domain.enums import EndReason
 from domain.ids import PlayerID
 from domain.rules.victory import compute_victory_points
-from rl.agents.base import RLAgent
 from rl.env.catan_env import CatanEnv
 from rl.evaluation.metrics import GameStats, TournamentResult
 
@@ -15,12 +15,20 @@ __all__ = ["Tournament", "aggregate_games"]
 
 
 class Tournament:
+    """Drives ``n`` games of fixed seat assignments and reports aggregate stats.
+
+    Only the engine-facing :class:`Agent` protocol is required — Tournament
+    never calls ``act``/``act_batch``. Pass :class:`PolicyAgent`,
+    :class:`RandomAgent`, :class:`HeuristicAgent`, or any other ``Agent``
+    interchangeably.
+    """
+
     def __init__(self, env_factory: Callable[[int], CatanEnv]) -> None:
         self._env_factory = env_factory
 
     def play(
         self,
-        agents: dict[PlayerID, RLAgent],
+        agents: dict[PlayerID, Agent],
         n_games: int,
         base_seed: int,
     ) -> TournamentResult:
@@ -29,7 +37,7 @@ class Tournament:
 
     def _play_one(
         self,
-        agents: dict[PlayerID, RLAgent],
+        agents: dict[PlayerID, Agent],
         seed: int,
     ) -> GameStats:
         env = self._env_factory(seed)

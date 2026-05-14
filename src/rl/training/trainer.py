@@ -52,6 +52,7 @@ from typing import Callable
 
 import torch
 
+from controller.agents import Agent
 from domain.ids import PlayerID
 from rl.agents.policy_agent import PolicyAgent
 from rl.encoding.action import ACTION_SPACE_SIZE
@@ -335,7 +336,7 @@ class Trainer:
 
         opp_rng = random.Random(self._seed_counter)
         eval_seat = self._player_ids[0]
-        agents: dict[PlayerID, object] = {}
+        agents: dict[PlayerID, Agent] = {}
         for pid in self._player_ids:
             if pid == eval_seat:
                 agents[pid] = self._learner
@@ -346,7 +347,7 @@ class Trainer:
                 )
 
         result = Tournament(self._env_factory).play(
-            agents,  # type: ignore[arg-type]
+            agents,
             n_games=self._cfg.eval_n_games,
             base_seed=self._seed_counter,
         )

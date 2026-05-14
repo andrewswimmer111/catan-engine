@@ -13,8 +13,8 @@ from __future__ import annotations
 import random
 from typing import Callable
 
+from controller.agents import Agent
 from domain.ids import PlayerID
-from rl.agents.base import RLAgent
 from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.random_agent import RandomAgent
 from rl.env.catan_env import CatanEnv
@@ -45,7 +45,10 @@ def bench_random_vs_random(
     n_games: int = 30, base_seed: int = 0, *, skip_proposals: bool = True
 ) -> TournamentResult:
     next_rng = _split_rng(base_seed)
-    agents = {pid: RandomAgent(next_rng(), skip_proposals=skip_proposals) for pid in DEFAULT_PLAYER_IDS}
+    agents: dict[PlayerID, Agent] = {
+        pid: RandomAgent(next_rng(), skip_proposals=skip_proposals)
+        for pid in DEFAULT_PLAYER_IDS
+    }
     return Tournament(_env_factory).play(agents, n_games=n_games, base_seed=base_seed)
 
 
@@ -54,7 +57,7 @@ def bench_heuristic_vs_random(
 ) -> TournamentResult:
     next_rng = _split_rng(base_seed)
     heur_seat = DEFAULT_PLAYER_IDS[0]
-    agents: dict[PlayerID, RLAgent] = {}
+    agents: dict[PlayerID, Agent] = {}
     for pid in DEFAULT_PLAYER_IDS:
         if pid == heur_seat:
             agents[pid] = HeuristicAgent(next_rng())
@@ -67,5 +70,5 @@ def bench_heuristic_vs_heuristic(
     n_games: int = 50, base_seed: int = 0
 ) -> TournamentResult:
     next_rng = _split_rng(base_seed)
-    agents = {pid: HeuristicAgent(next_rng()) for pid in DEFAULT_PLAYER_IDS}
+    agents: dict[PlayerID, Agent] = {pid: HeuristicAgent(next_rng()) for pid in DEFAULT_PLAYER_IDS}
     return Tournament(_env_factory).play(agents, n_games=n_games, base_seed=base_seed)

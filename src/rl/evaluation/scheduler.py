@@ -32,6 +32,7 @@ import random
 from pathlib import Path
 from typing import Callable
 
+from controller.agents import Agent
 from domain.ids import PlayerID
 from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.policy_agent import PolicyAgent
@@ -176,7 +177,7 @@ class EvalScheduler:
             env = self._archive_env_factory(seed)
             player_ids = list(env.state.config.player_ids)
             learner_seat = player_ids[0]
-            opponents = {
+            opponents: dict[PlayerID, Agent] = {
                 pid: RandomAgent(
                     random.Random(rng.randrange(2**32)), skip_proposals=True
                 )
@@ -186,7 +187,7 @@ class EvalScheduler:
                 env=env,
                 learner=self._trainer.learner,
                 learner_seat=learner_seat,
-                opponents=opponents,  # type: ignore[arg-type]
+                opponents=opponents,
                 metadata={
                     "checkpoint_step": int(current_step),
                     "seed": int(seed),
@@ -239,9 +240,7 @@ def make_bench_vs_random(
             seed=base_seed,
         )
         return Tournament(env_factory).play(
-            agents,  # type: ignore[arg-type]
-            n_games=n_games,
-            base_seed=base_seed,
+            agents, n_games=n_games, base_seed=base_seed
         )
 
     return bench
@@ -261,9 +260,7 @@ def make_bench_vs_heuristic(
             seed=base_seed,
         )
         return Tournament(env_factory).play(
-            agents,  # type: ignore[arg-type]
-            n_games=n_games,
-            base_seed=base_seed,
+            agents, n_games=n_games, base_seed=base_seed
         )
 
     return bench
@@ -286,13 +283,11 @@ def make_bench_vs_pool(
         opponents = pool.sample_opponents(learner, n=3)
         seats = [PlayerID(i) for i in range(1, 5)]
         learner_seat = seats[0]
-        agents: dict[PlayerID, PolicyAgent] = {learner_seat: learner}
+        agents: dict[PlayerID, Agent] = {learner_seat: learner}
         for pid, opp in zip(seats[1:], opponents):
-            agents[pid] = opp  # type: ignore[assignment]
+            agents[pid] = opp
         return Tournament(env_factory).play(
-            agents,  # type: ignore[arg-type]
-            n_games=n_games,
-            base_seed=base_seed,
+            agents, n_games=n_games, base_seed=base_seed
         )
 
     return bench
@@ -305,14 +300,14 @@ def make_bench_vs_pool(
 
 def _learner_plus_three(
     learner: PolicyAgent,
-    opponent_factory: Callable[[random.Random], object],
+    opponent_factory: Callable[[random.Random], Agent],
     seed: int,
-) -> dict[PlayerID, object]:
+) -> dict[PlayerID, Agent]:
     """Build a {seat → agent} dict with the learner at seat 1 and three
     freshly-seeded opponents at the rest."""
     seats = [PlayerID(i) for i in range(1, 5)]
     rng = random.Random(seed)
-    agents: dict[PlayerID, object] = {seats[0]: learner}
+    agents: dict[PlayerID, Agent] = {seats[0]: learner}
     for pid in seats[1:]:
         agents[pid] = opponent_factory(random.Random(rng.randrange(2**32)))
     return agents
