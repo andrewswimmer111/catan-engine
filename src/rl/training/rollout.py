@@ -19,6 +19,13 @@ learner's last transition with the win / loss bonus — but only if the
 learner did *not* act on the terminal step, since in that case the env's
 own ``step_reward`` already credited them.
 
+Cross-step (non-acting) rewards are pulled from
+:attr:`CatanEnv.last_cross_rewards` after every step. When an opponent's
+action drops the learner's ``victory_points_public`` (the canonical case
+is losing Longest Road / Largest Army), the worker writes the negative
+shaping back onto the learner's most recent stored transition through
+the same retroactive-credit machinery used for terminal payouts.
+
 Bootstrap values
 ----------------
 
@@ -249,12 +256,36 @@ class RolloutWorker:
             self._buffer.add(stored)
             self._last_transition_idx = len(self._buffer) - 1
             self._current_episode_return += float(reward)
+        else:
+            # Opponent step — the env's step_reward credited the opponent.
+            # Any side-effect VP loss the learner just suffered (e.g.
+            # opponent grabbing Longest Road from us) is reported through
+            # cross_step_rewards and credited retroactively here.
+            self._apply_cross_step_credit()
 
         if done:
             outcome = self._episode_outcome()
             self._apply_terminal_credit(acting_pid_at_terminal=acting_pid)
             return True, outcome
         return False, None
+
+    def _apply_cross_step_credit(self) -> None:
+        """Write the learner's cross-step reward (if any) to its last transition.
+
+        Called after opponent steps only — the learner's own actions have
+        their reward routed through ``stored.reward`` in :meth:`_apply_step`.
+        Silent when the learner has no stored transition yet (early
+        opponent turns before the learner has acted).
+        """
+        if self._last_transition_idx is None:
+            return
+        learner_cross = float(
+            self._env.last_cross_rewards.get(self._learner_seat, 0.0)
+        )
+        if learner_cross == 0.0:
+            return
+        self._buffer.add_terminal_reward(self._last_transition_idx, learner_cross)
+        self._current_episode_return += learner_cross
 
     # ------------------------------------------------------------------
     # Episode lifecycle

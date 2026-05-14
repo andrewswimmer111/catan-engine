@@ -41,6 +41,17 @@ subprocess. The alternative — running opponents in the main process too —
 needs another round-trip per opponent move (3× more IPC per env step) and
 only pays off if opponents are GPU-heavy. With CPU random/heuristic
 opponents and small policy opponents on CPU, the current split wins.
+
+Cross-step credit
+-----------------
+
+Opponent turns advance entirely inside the subprocess, so any
+``RewardFn.cross_step_rewards`` credit the learner earns from those
+opponent steps (e.g. an opponent grabbing Longest Road) has to be
+accumulated locally and folded into the next ``WorkerStepResult.reward``
+sent back to main. Without this, the vec path would silently drop
+side-effect rewards that the single-process :class:`RolloutWorker`
+attributes correctly.
 """
 
 from __future__ import annotations
@@ -257,10 +268,16 @@ def _advance_to_next_learner_decision(
     If an opponent's move terminates the game, the env is reset internally
     and the loop continues — the ``done`` flag is OR'd across all
     terminations so the caller knows an episode boundary was crossed.
+
+    Cross-step rewards owed to the learner from each opponent step are
+    accumulated into ``cross_accumulated`` and added to the outgoing
+    ``reward`` so the main-process buffer sees the same total credit it
+    would have under the single-env :class:`RolloutWorker`.
     """
     env = bundle.env
     done = prior_done
     info = prior_info
+    cross_accumulated = 0.0
     while env.current_agent != bundle.learner_seat:
         snap = GameSnapshot(
             state=env.state, step_index=0, last_action=None, last_events=()
@@ -274,6 +291,9 @@ def _advance_to_next_learner_decision(
             env.reset(seed=seed)
             continue
         _, _, opp_done, _ = env.step(action)
+        cross_accumulated += float(
+            env.last_cross_rewards.get(bundle.learner_seat, 0.0)
+        )
         if opp_done:
             info = _terminal_info(bundle, ended_by="opponent")
             done = True
@@ -284,7 +304,7 @@ def _advance_to_next_learner_decision(
     return WorkerStepResult(
         obs=obs,
         mask=env.action_mask(),
-        reward=reward,
+        reward=reward + cross_accumulated,
         done=done,
         agent=bundle.learner_seat,
         info=info or {"phase": env.state.phase.name},
