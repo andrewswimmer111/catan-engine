@@ -7,8 +7,11 @@
 # Or to keep the laptop awake while it runs:
 #   caffeinate -i ./scripts/train_overnight.sh
 #
-# Defaults are tuned for ~9 hours wall on a 4-core mac at ~158 steps/s with
-# the default network (512×3 MLP). Override TOTAL_STEPS for shorter runs.
+# Defaults: shaped reward + 3 HeuristicAgent baselines in the OpponentPool
+# at weight 0.6, single-env rollouts so the pool actually applies, stdout
+# heartbeat every 25 iters (~50k env steps), watchdog aborts if rollout/wins
+# stays 0 for 100 consecutive iters. At ~75 steps/s on a 4-core mac the 2M
+# default total takes ~7.5 hours; tune via TOTAL_STEPS for shorter runs.
 #
 # Outputs land under runs/overnight_<timestamp>/:
 #   tb/                  — TensorBoard event files (point `tensorboard --logdir` here)
@@ -31,23 +34,36 @@ if [ -f venv/bin/activate ]; then
     source venv/bin/activate
 fi
 
-TOTAL_STEPS="${1:-4000000}"
-NUM_ENVS="${NUM_ENVS:-4}"
-EVAL_EVERY="${EVAL_EVERY:-250000}"
+TOTAL_STEPS="${1:-2000000}"
+NUM_ENVS="${NUM_ENVS:-1}"
+EVAL_EVERY="${EVAL_EVERY:-100000}"
 EVAL_GAMES="${EVAL_GAMES:-30}"
-SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-250000}"
+SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-100000}"
 FINAL_EVAL_GAMES="${FINAL_EVAL_GAMES:-200}"
+REWARD="${REWARD:-shaped}"
+POOL_BASELINES="${POOL_BASELINES:-3}"
+BASELINE_WEIGHT="${BASELINE_WEIGHT:-0.6}"
+ENTROPY_COEF="${ENTROPY_COEF:-0.03}"
+PRINT_EVERY="${PRINT_EVERY:-25}"
+WATCHDOG_ZERO_WINS_ITERS="${WATCHDOG_ZERO_WINS_ITERS:-100}"
 
 NAME="overnight_$(date +%Y%m%d_%H%M)"
 RUN_DIR="runs/$NAME"
 mkdir -p "$RUN_DIR"
 
 echo "[train_overnight] run=$NAME total_steps=$TOTAL_STEPS num_envs=$NUM_ENVS"
+echo "[train_overnight] reward=$REWARD baselines=$POOL_BASELINES weight=$BASELINE_WEIGHT entropy=$ENTROPY_COEF"
 echo "[train_overnight] output=$RUN_DIR"
 
 python scripts/train.py \
     --total-steps "$TOTAL_STEPS" \
     --num-envs "$NUM_ENVS" \
+    --reward "$REWARD" \
+    --pool-baselines "$POOL_BASELINES" \
+    --baseline-weight "$BASELINE_WEIGHT" \
+    --entropy-coef "$ENTROPY_COEF" \
+    --print-every "$PRINT_EVERY" \
+    --watchdog-zero-wins-iters "$WATCHDOG_ZERO_WINS_ITERS" \
     --eval-every "$EVAL_EVERY" --eval-games "$EVAL_GAMES" \
     --snapshot-every "$SNAPSHOT_EVERY" \
     --output-dir "$RUN_DIR" \
