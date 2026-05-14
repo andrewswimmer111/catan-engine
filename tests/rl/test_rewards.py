@@ -271,7 +271,7 @@ def test_shaped_cross_step_rewards_empty_on_stalemate() -> None:
 
 
 def test_shaped_stalemate_penalty_default() -> None:
-    """With default penalty=0.5, stalemate step_reward is -0.5 for every seat."""
+    """Default stalemate penalty applies to every seat as a flat negative reward."""
     state = _fresh_state(seed=0)
     pids = _player_ids(state)
 
@@ -284,9 +284,11 @@ def test_shaped_stalemate_penalty_default() -> None:
         terminal, events=[GameStalled(turn_number=99, reason=EndReason.STALEMATE_VP_STALL)]
     )
 
-    fn = ShapedReward(vp_coef=0.05, turn_tick=-0.001, win_bonus=1.0)
+    fn = ShapedReward()
     for pid in pids:
-        assert fn.step_reward(state, result.action, result, pid) == pytest.approx(-0.5)
+        assert fn.step_reward(state, result.action, result, pid) == pytest.approx(
+            -fn.stalemate_penalty
+        )
 
 
 def test_shaped_stalemate_penalty_zero_reproduces_old_behavior() -> None:

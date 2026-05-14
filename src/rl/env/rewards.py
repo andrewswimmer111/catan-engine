@@ -162,17 +162,17 @@ class ShapedReward:
         a learner with positive cumulative shaping from setup builds finds
         stalling strictly better than playing — see module docstring.
 
-    Defaults (``vp_coef=0.05``, ``turn_tick=-0.001``, ``win_bonus=1.0``,
-    ``stalemate_penalty=0.5``) are rough early-bring-up values. Set
+    Defaults (``vp_coef=0.1``, ``turn_tick=-0.001``, ``win_bonus=1.0``,
+    ``stalemate_penalty=0.8``) are rough early-bring-up values. Set
     ``stalemate_penalty=0.0`` to reproduce the pre-penalty behaviour.
     """
 
     def __init__(
         self,
-        vp_coef: float = 0.05,
+        vp_coef: float = 0.1,
         turn_tick: float = -0.001,
         win_bonus: float = 1.0,
-        stalemate_penalty: float = 0.5,
+        stalemate_penalty: float = 0.8,
     ) -> None:
         if stalemate_penalty < 0:
             raise ValueError(

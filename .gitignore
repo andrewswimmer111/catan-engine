@@ -17,3 +17,4 @@ build/
 
 # Training / experiment outputs (TensorBoard, checkpoints, eval dumps)
 runs/
+.DS_Store
