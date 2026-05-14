@@ -14,3 +14,6 @@ build/
 # AI tools
 .claude
 .cursor
+
+# Training / experiment outputs (TensorBoard, checkpoints, eval dumps)
+runs/
