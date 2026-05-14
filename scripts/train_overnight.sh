@@ -7,11 +7,16 @@
 # Or to keep the laptop awake while it runs:
 #   caffeinate -i ./scripts/train_overnight.sh
 #
-# Defaults: shaped reward + 3 HeuristicAgent baselines in the OpponentPool
-# at weight 0.6, single-env rollouts so the pool actually applies, stdout
-# heartbeat every 25 iters (~50k env steps), watchdog aborts if rollout/wins
-# stays 0 for 100 consecutive iters. At ~75 steps/s on a 4-core mac the 2M
-# default total takes ~7.5 hours; tune via TOTAL_STEPS for shorter runs.
+# Defaults: shaped reward (with 0.5 stalemate penalty) + 3 HeuristicAgent
+# baselines in the OpponentPool at weight 0.6, single-env rollouts so the
+# pool actually applies, stdout heartbeat every 25 iters (~50k env steps),
+# watchdog aborts if rollout/wins stays 0 for 200 consecutive iters
+# (~90 minutes at 75 steps/s). The stalemate penalty is what makes
+# stalling unattractive relative to playing out a loss — without it the
+# first attempt at a shaped-reward run found "stall the game" as a local
+# minimum and the watchdog correctly aborted it. At ~75 steps/s on a
+# 4-core mac the 2M default total takes ~7.5 hours; tune via TOTAL_STEPS
+# for shorter runs.
 #
 # Outputs land under runs/overnight_<timestamp>/:
 #   tb/                  — TensorBoard event files (point `tensorboard --logdir` here)
@@ -41,24 +46,28 @@ EVAL_GAMES="${EVAL_GAMES:-30}"
 SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-100000}"
 FINAL_EVAL_GAMES="${FINAL_EVAL_GAMES:-200}"
 REWARD="${REWARD:-shaped}"
+STALEMATE_PENALTY="${STALEMATE_PENALTY:-0.5}"
 POOL_BASELINES="${POOL_BASELINES:-3}"
 BASELINE_WEIGHT="${BASELINE_WEIGHT:-0.6}"
 ENTROPY_COEF="${ENTROPY_COEF:-0.03}"
 PRINT_EVERY="${PRINT_EVERY:-25}"
-WATCHDOG_ZERO_WINS_ITERS="${WATCHDOG_ZERO_WINS_ITERS:-100}"
+WATCHDOG_ZERO_WINS_ITERS="${WATCHDOG_ZERO_WINS_ITERS:-200}"
 
 NAME="overnight_$(date +%Y%m%d_%H%M)"
 RUN_DIR="runs/$NAME"
 mkdir -p "$RUN_DIR"
 
 echo "[train_overnight] run=$NAME total_steps=$TOTAL_STEPS num_envs=$NUM_ENVS"
-echo "[train_overnight] reward=$REWARD baselines=$POOL_BASELINES weight=$BASELINE_WEIGHT entropy=$ENTROPY_COEF"
+echo "[train_overnight] reward=$REWARD stalemate_penalty=$STALEMATE_PENALTY"
+echo "[train_overnight] baselines=$POOL_BASELINES weight=$BASELINE_WEIGHT entropy=$ENTROPY_COEF"
+echo "[train_overnight] watchdog_zero_wins_iters=$WATCHDOG_ZERO_WINS_ITERS"
 echo "[train_overnight] output=$RUN_DIR"
 
 python scripts/train.py \
     --total-steps "$TOTAL_STEPS" \
     --num-envs "$NUM_ENVS" \
     --reward "$REWARD" \
+    --stalemate-penalty "$STALEMATE_PENALTY" \
     --pool-baselines "$POOL_BASELINES" \
     --baseline-weight "$BASELINE_WEIGHT" \
     --entropy-coef "$ENTROPY_COEF" \

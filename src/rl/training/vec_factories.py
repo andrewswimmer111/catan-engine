@@ -48,6 +48,7 @@ __all__ = [
 
 _PLAYER_IDS: list[PlayerID] = [PlayerID(i) for i in range(1, 5)]
 _REWARD_ENV_VAR = "CATAN_RL_REWARD"
+_STALEMATE_PENALTY_ENV_VAR = "CATAN_RL_STALEMATE_PENALTY"
 
 
 def _learner_seat_for(seed: int) -> PlayerID:
@@ -55,11 +56,24 @@ def _learner_seat_for(seed: int) -> PlayerID:
 
 
 def _make_reward_fn() -> RewardFn:
-    """Pick the reward function based on ``CATAN_RL_REWARD`` (default sparse)."""
+    """Pick the reward function based on env vars (defaults: sparse, penalty=0.5).
+
+    Both knobs come through env vars rather than constructor arguments so
+    they survive ``multiprocessing.spawn`` — see module docstring.
+    """
     kind = os.environ.get(_REWARD_ENV_VAR, "sparse").lower()
-    if kind == "shaped":
+    if kind != "shaped":
+        return SparseWinReward()
+    raw_penalty = os.environ.get(_STALEMATE_PENALTY_ENV_VAR)
+    if raw_penalty is None:
         return ShapedReward()
-    return SparseWinReward()
+    try:
+        penalty = float(raw_penalty)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_STALEMATE_PENALTY_ENV_VAR}={raw_penalty!r} is not a number"
+        ) from exc
+    return ShapedReward(stalemate_penalty=penalty)
 
 
 def _make_env(seed: int) -> CatanEnv:

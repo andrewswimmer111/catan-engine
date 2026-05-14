@@ -71,16 +71,21 @@ from rl.training.vec_factories import (
 _PLAYER_IDS: list[PlayerID] = [PlayerID(i) for i in range(1, 5)]
 
 
-def _make_reward_fn(kind: str) -> RewardFn:
+def _make_reward_fn(kind: str, stalemate_penalty: float) -> RewardFn:
     if kind == "shaped":
-        return ShapedReward()
+        return ShapedReward(stalemate_penalty=stalemate_penalty)
     return SparseWinReward()
 
 
-def _make_env_factory(reward_kind: str) -> Callable[[int], CatanEnv]:
+def _make_env_factory(
+    reward_kind: str, stalemate_penalty: float
+) -> Callable[[int], CatanEnv]:
     """Build a seed→CatanEnv factory closing over the chosen reward kind."""
     def factory(seed: int) -> CatanEnv:
-        return CatanEnv(seed=seed, reward_fn=_make_reward_fn(reward_kind))
+        return CatanEnv(
+            seed=seed,
+            reward_fn=_make_reward_fn(reward_kind, stalemate_penalty),
+        )
     return factory
 
 
@@ -220,6 +225,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="reward function for training and eval envs. sparse=±1 at terminal; "
              "shaped adds vp_coef × Δvp per step + small turn penalty.",
     )
+    p.add_argument(
+        "--stalemate-penalty",
+        type=float,
+        default=0.5,
+        help="ShapedReward only: per-seat penalty when the game stalemates. "
+             "Keeps stalling from beating losing on the per-episode return; "
+             "set to 0 to reproduce the pre-penalty contract.",
+    )
 
     # Heartbeat / watchdog.
     p.add_argument(
@@ -357,17 +370,33 @@ def main(argv: list[str] | None = None) -> int:
     log_dir = output_dir / "tb"
     snapshot_dir = output_dir / "snapshots"
 
+    if args.stalemate_penalty < 0:
+        print(
+            f"error: --stalemate-penalty must be non-negative (got {args.stalemate_penalty})",
+            file=sys.stderr,
+        )
+        return 2
+
     cfg = _build_config(args)
     (output_dir / "config.json").write_text(
-        json.dumps(_config_to_jsonable(cfg, args.reward), indent=2)
+        json.dumps(
+            _config_to_jsonable(cfg, args.reward, args.stalemate_penalty),
+            indent=2,
+        )
     )
     print(f"[train] output_dir={output_dir}", flush=True)
-    print(f"[train] cfg={cfg} reward={args.reward}", flush=True)
+    print(
+        f"[train] cfg={cfg} reward={args.reward} "
+        f"stalemate_penalty={args.stalemate_penalty}",
+        flush=True,
+    )
 
-    # Subprocess vec workers read the reward kind from this env var. Setting
-    # it before SubprocVecEnv.spawn() lets them pick up the same choice as
-    # the main-process env factory below.
+    # Subprocess vec workers can't accept closure arguments, so the reward
+    # kind and the stalemate-penalty knob both ride through env vars.
+    # Setting them before SubprocVecEnv.spawn() lets workers pick up the
+    # same choices as the main-process env factory below.
     os.environ["CATAN_RL_REWARD"] = args.reward
+    os.environ["CATAN_RL_STALEMATE_PENALTY"] = str(args.stalemate_penalty)
 
     torch.manual_seed(cfg.seed)
     model = MLPPolicyValue(
@@ -377,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     learner = PolicyAgent(model, ActionEncoder(_PLAYER_IDS))
     pool = _build_pool(args)
-    env_factory = _make_env_factory(args.reward)
+    env_factory = _make_env_factory(args.reward, args.stalemate_penalty)
 
     vec_factory = None
     if cfg.num_envs > 1:
@@ -417,7 +446,9 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _config_to_jsonable(cfg: TrainConfig, reward_kind: str) -> dict:
+def _config_to_jsonable(
+    cfg: TrainConfig, reward_kind: str, stalemate_penalty: float
+) -> dict:
     """Flatten ``TrainConfig`` to a JSON-friendly dict for the run record."""
     return {
         "ppo": {
@@ -444,6 +475,7 @@ def _config_to_jsonable(cfg: TrainConfig, reward_kind: str) -> dict:
         "seed": cfg.seed,
         "num_envs": cfg.num_envs,
         "reward": reward_kind,
+        "stalemate_penalty": stalemate_penalty,
     }
 
 
