@@ -80,6 +80,13 @@ class CatanEnv:
         # at each step entry so a stale list never feeds the next decision.
         self._legal_cache: list[Action] | None = None
 
+        # Per-step rewards owed to non-acting seats (the canonical case is
+        # losing Longest Road / Largest Army to whoever just acted). Set
+        # by ``step()`` after applying the action; consumed by the rollout
+        # workers between learner turns to retroactively credit the
+        # learner's last stored transition. Empty after ``reset()``.
+        self._last_cross_rewards: dict[PlayerID, float] = {}
+
     # ------------------------------------------------------------------
     # Gym-style interface
     # ------------------------------------------------------------------
@@ -92,6 +99,7 @@ class CatanEnv:
         self._state = self._engine.new_game(cfg)
         self._last_events = []
         self._legal_cache = None
+        self._last_cross_rewards = {}
         if self._user_action_encoder is None:
             self._action_encoder = ActionEncoder.for_state(self._state)
         return self._encode_obs(), self._info()
@@ -105,6 +113,11 @@ class CatanEnv:
         prev_state = self._state
         result = self._engine.apply_action(prev_state, typed_action)
         reward = float(self._reward_fn.step_reward(prev_state, typed_action, result, acting_agent))
+        self._last_cross_rewards = dict(
+            self._reward_fn.cross_step_rewards(
+                prev_state, typed_action, result, acting_agent
+            )
+        )
         self._state = result.state
         self._last_events = list(result.events)
         self._legal_cache = None
@@ -145,6 +158,16 @@ class CatanEnv:
     @property
     def reward_fn(self) -> RewardFn:
         return self._reward_fn
+
+    @property
+    def last_cross_rewards(self) -> dict[PlayerID, float]:
+        """Per-step rewards owed to non-acting seats from the most recent step.
+
+        Returns a fresh dict on each call so callers can't accidentally
+        clobber internal state. Empty after ``reset()`` and on steps where
+        no non-acting seat saw a side-effect VP change.
+        """
+        return dict(self._last_cross_rewards)
 
     # ------------------------------------------------------------------
     # Internal helpers

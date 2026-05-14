@@ -17,6 +17,26 @@ Two concrete reward fns ship here:
   hidden VP cards never leak), plus ``±win_bonus`` at the terminal step.
   Stalemate terminals reward 0 for everyone — log ``state.end_reason`` to
   decide whether to keep the trajectory.
+
+Per-seat credit decomposes into three orthogonal channels:
+
+* ``step_reward(prev, action, result, agent)`` — reward to the *acting*
+  seat, computed by the env per step.
+* ``cross_step_rewards(prev, action, result, acting)`` — per-step rewards
+  to *non-acting* seats (e.g. an opponent's road build dropping your
+  Longest Road bonus). The rollout worker writes these onto each
+  non-acting seat's last stored transition; without them, a seat's
+  ``victory_points_public`` could decrease without any negative
+  gradient signal.
+* ``terminal_rewards(final_state)`` — the per-seat win/loss bonus at game
+  end, again written by the worker onto non-acting seats' last
+  transitions.
+
+The three channels are *disjoint*: ``step_reward`` covers the acting seat
+per step; ``cross_step_rewards`` covers non-acting seats per step (no
+win/loss bonus); ``terminal_rewards`` covers non-acting seats at terminal
+(no shaping). Acting + non-acting at terminal therefore receive the same
+total reward, just split across two methods.
 """
 
 from __future__ import annotations
@@ -32,13 +52,11 @@ __all__ = ["RewardFn", "SparseWinReward", "ShapedReward"]
 
 
 class RewardFn(Protocol):
-    """Compute the per-step reward for ``agent`` after ``action`` was applied.
+    """Three-channel per-seat reward contract.
 
-    ``step_reward`` runs at every env step and only credits the seat that
-    just acted. ``terminal_rewards`` runs once per terminated game and
-    returns the reward each *other* seat should have received at the
-    terminal step — the rollout worker writes these retroactively onto
-    each seat's last transition so PPO sees the multi-agent loss signal.
+    See the module docstring for how ``step_reward`` /
+    ``cross_step_rewards`` / ``terminal_rewards`` decompose acting vs.
+    non-acting seats and per-step vs. terminal credit.
     """
 
     def step_reward(
@@ -48,6 +66,23 @@ class RewardFn(Protocol):
         result: StepResult,
         agent: PlayerID,
     ) -> float: ...
+
+    def cross_step_rewards(
+        self,
+        prev_state: GameState,
+        action: Action,
+        result: StepResult,
+        acting_agent: PlayerID,
+    ) -> dict[PlayerID, float]:
+        """Per-step rewards for *non-acting* seats only.
+
+        Returns a dict ``{seat: reward}`` for seats whose side-effect
+        rewards the rollout worker should retroactively credit. The
+        acting seat is never included — its reward already came through
+        ``step_reward``. Implementations that don't care about per-step
+        non-acting effects may simply return ``{}``.
+        """
+        ...
 
     def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]: ...
 
@@ -90,6 +125,16 @@ class SparseWinReward:
         if result.winner is None:  # stalemate
             return 0.0
         return 1.0 if result.winner == agent else -1.0
+
+    def cross_step_rewards(
+        self,
+        prev_state: GameState,
+        action: Action,
+        result: StepResult,
+        acting_agent: PlayerID,
+    ) -> dict[PlayerID, float]:
+        # Sparse rewards never credit non-acting seats mid-game.
+        return {}
 
     def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]:
         winner = final_state.winner
@@ -147,6 +192,37 @@ class ShapedReward:
         if result.winner == agent:
             return shaped + self.win_bonus
         return shaped - self.win_bonus
+
+    def cross_step_rewards(
+        self,
+        prev_state: GameState,
+        action: Action,
+        result: StepResult,
+        acting_agent: PlayerID,
+    ) -> dict[PlayerID, float]:
+        """``vp_coef × Δvp_public`` for every non-acting seat that gained or lost VP.
+
+        The canonical use case is symmetric Longest Road / Largest Army
+        title flips: when the acting seat takes LR from a non-acting
+        seat, the non-acting seat's ``victory_points_public`` drops by 2,
+        and they receive ``-2 × vp_coef`` here. Without this channel the
+        loss is invisible to PPO because ``step_reward`` only credits the
+        acting seat.
+
+        Stalemate terminals zero out everywhere (matching ``step_reward``);
+        non-stalemate terminals still shape so a non-acting seat whose VP
+        moves on the final step gets that delta credited.
+        """
+        if _is_stalemate(result):
+            return {}
+        rewards: dict[PlayerID, float] = {}
+        for pid in result.state.config.player_ids:
+            if pid == acting_agent:
+                continue
+            delta = _vp_public(result.state, pid) - _vp_public(prev_state, pid)
+            if delta != 0:
+                rewards[pid] = self.vp_coef * delta
+        return rewards
 
     def terminal_rewards(self, final_state: GameState) -> dict[PlayerID, float]:
         winner = final_state.winner

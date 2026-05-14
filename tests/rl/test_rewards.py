@@ -197,6 +197,79 @@ def test_shaped_terminal_loser_gets_minus_win_bonus() -> None:
     assert reward == pytest.approx(-0.001 - 1.0)
 
 
+def test_sparse_cross_step_rewards_always_empty() -> None:
+    state = _fresh_state(seed=0)
+    pids = _player_ids(state)
+    # Mutate a non-acting seat's VP — sparse never cares per-step.
+    next_state = copy.deepcopy(state)
+    next_state.players[pids[1]].victory_points_public = (
+        state.players[pids[1]].victory_points_public + 2
+    )
+    result = _make_step_result(next_state, events=[])
+
+    fn = SparseWinReward()
+    assert fn.cross_step_rewards(state, result.action, result, pids[0]) == {}
+
+
+def test_shaped_cross_step_rewards_credits_non_acting_vp_loss() -> None:
+    """When a non-acting seat's VP drops (lost Longest Road), it earns ``vp_coef × Δ``."""
+    state = _fresh_state(seed=0)
+    pids = _player_ids(state)
+    acting = pids[0]
+    losing_seat = pids[2]
+
+    next_state = copy.deepcopy(state)
+    next_state.players[losing_seat].victory_points_public = (
+        state.players[losing_seat].victory_points_public - 2
+    )
+    next_state.players[acting].victory_points_public = (
+        state.players[acting].victory_points_public + 2
+    )
+    result = _make_step_result(next_state, events=[])
+
+    fn = ShapedReward(vp_coef=0.05, turn_tick=-0.001, win_bonus=1.0)
+    cross = fn.cross_step_rewards(state, result.action, result, acting)
+    # Acting seat is excluded; losing seat gets -0.10; the other two get 0
+    # (delta=0) and are dropped.
+    assert cross == {losing_seat: pytest.approx(-0.10)}
+
+
+def test_shaped_cross_step_rewards_skip_acting_seat() -> None:
+    state = _fresh_state(seed=0)
+    pids = _player_ids(state)
+    acting = pids[1]
+
+    next_state = copy.deepcopy(state)
+    next_state.players[acting].victory_points_public = (
+        state.players[acting].victory_points_public + 1
+    )
+    result = _make_step_result(next_state, events=[])
+
+    fn = ShapedReward(vp_coef=0.05, turn_tick=-0.001, win_bonus=1.0)
+    cross = fn.cross_step_rewards(state, result.action, result, acting)
+    assert cross == {}, "acting seat must not appear in cross_step_rewards"
+
+
+def test_shaped_cross_step_rewards_empty_on_stalemate() -> None:
+    state = _fresh_state(seed=0)
+    pids = _player_ids(state)
+
+    terminal = _terminal_state(state, winner=None)
+    terminal.players[pids[2]].victory_points_public = (
+        state.players[pids[2]].victory_points_public - 2
+    )
+    result = _make_step_result(
+        terminal,
+        events=[GameStalled(turn_number=99, reason=EndReason.STALEMATE_VP_STALL)],
+    )
+
+    fn = ShapedReward(vp_coef=0.05, turn_tick=-0.001, win_bonus=1.0)
+    cross = fn.cross_step_rewards(state, result.action, result, pids[0])
+    assert cross == {}, (
+        "stalemate terminals should zero cross-step credit (mirroring step_reward)"
+    )
+
+
 def test_shaped_zero_on_stalemate_for_everyone() -> None:
     state = _fresh_state(seed=0)
     pids = _player_ids(state)
