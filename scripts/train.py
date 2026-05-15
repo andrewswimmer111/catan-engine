@@ -48,7 +48,9 @@ from domain.ids import PlayerID
 from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.policy_agent import PolicyAgent
 from rl.encoding.action import ACTION_SPACE_SIZE, ActionEncoder
-from rl.encoding.observation import OBS_SHAPE
+from rl.encoding.graph_observation import GRAPH_OBS_SHAPE, GraphObservationEncoder
+from rl.encoding.observation import OBS_SHAPE, FlatObservationEncoder
+from rl.encoding.protocol import ObservationEncoder
 from rl.env.catan_env import CatanEnv
 from rl.env.rewards import RewardFn, ShapedReward, SparseWinReward
 from rl.evaluation.elo import EloTracker
@@ -58,8 +60,13 @@ from rl.evaluation.scheduler import (
     make_bench_vs_pool,
     make_bench_vs_random,
 )
+from rl.models.gnn import DEFAULT_GNN_ARCH, GNNPolicyValue
 from rl.models.mlp import MLPPolicyValue
-from rl.training.checkpoint import CheckpointMeta, load_checkpoint
+from rl.training.checkpoint import (
+    CheckpointMeta,
+    EncoderKind,
+    load_checkpoint,
+)
 from rl.training.config import DEFAULT_BASELINE_CONFIG, PPOConfig, TrainConfig
 from rl.training.opponent_pool import OpponentPool
 from rl.training.trainer import Trainer
@@ -78,15 +85,48 @@ def _make_reward_fn(kind: str, stalemate_penalty: float) -> RewardFn:
     return SparseWinReward()
 
 
+def _make_obs_encoder(encoder_kind: EncoderKind) -> ObservationEncoder:
+    if encoder_kind == "graph":
+        return GraphObservationEncoder()
+    return FlatObservationEncoder()
+
+
+def _build_model(
+    encoder_kind: EncoderKind,
+    hidden_sizes: tuple[int, ...],
+    obs_shape: tuple[int, ...],
+) -> torch.nn.Module:
+    """Construct the policy/value model matching ``encoder_kind``.
+
+    The flat path consumes ``hidden_sizes`` to size the MLP trunk; the
+    graph path uses :data:`DEFAULT_GNN_ARCH`. Adding a CLI knob for the
+    GNN arch later means extending this function and the parser.
+    """
+    if encoder_kind == "graph":
+        return GNNPolicyValue(
+            obs_dim=obs_shape[0],
+            action_dim=ACTION_SPACE_SIZE,
+            arch=DEFAULT_GNN_ARCH,
+        )
+    return MLPPolicyValue(
+        obs_dim=obs_shape[0],
+        action_dim=ACTION_SPACE_SIZE,
+        hidden=hidden_sizes,
+    )
+
+
 def _make_env_factory(
-    reward_kind: str, stalemate_penalty: float
+    reward_kind: str, stalemate_penalty: float, encoder_kind: EncoderKind
 ) -> Callable[[int], CatanEnv]:
-    """Build a seed→CatanEnv factory closing over the chosen reward kind."""
+    """Build a seed→CatanEnv factory closing over reward + encoder choices."""
+
     def factory(seed: int) -> CatanEnv:
         return CatanEnv(
             seed=seed,
+            obs_encoder=_make_obs_encoder(encoder_kind),
             reward_fn=_make_reward_fn(reward_kind, stalemate_penalty),
         )
+
     return factory
 
 
@@ -174,7 +214,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--hidden-sizes",
         type=_parse_hidden,
         default=DEFAULT_BASELINE_CONFIG.hidden_sizes,
-        help="comma-separated MLP widths, e.g. 512,512,512",
+        help="comma-separated MLP widths, e.g. 512,512,512 (flat encoder only)",
+    )
+    p.add_argument(
+        "--encoder",
+        choices=("flat", "graph"),
+        default="flat",
+        help="observation encoder / model trunk. flat=FlatObservationEncoder "
+             "+ MLPPolicyValue (Phase 0 baseline); graph=GraphObservationEncoder "
+             "+ GNNPolicyValue (Phase 1, relational over the board graph).",
     )
     p.add_argument(
         "--num-envs",
@@ -318,26 +366,44 @@ def _resolve_warm_start(
     warm-start was requested. The agent is held only to forward its
     ``state_dict`` into the freshly-constructed learner below — its own
     encoder, device, and life-cycle are otherwise discarded.
+
+    Refuses to warm-start across encoder kinds: a flat checkpoint cannot
+    seed a graph run and vice versa (the state_dict shapes don't even
+    line up). The user must choose the matching ``--encoder`` flag.
     """
     if args.init_from is None:
         return None, None
     path = Path(args.init_from)
     agent, meta = load_checkpoint(path)
-    ckpt_hidden = meta.model_arch.hidden
-    requested_hidden = tuple(args.hidden_sizes)
-    if requested_hidden != ckpt_hidden:
-        # The checkpoint's architecture is load-bearing for state_dict shape
-        # match. Override silently but tell the user we did so.
+    if meta.model_arch.encoder_kind != args.encoder:
+        raise ValueError(
+            f"--init-from {path} was trained with encoder "
+            f"{meta.model_arch.encoder_kind!r} but --encoder is "
+            f"{args.encoder!r}; the two state_dicts are incompatible."
+        )
+    if meta.model_arch.encoder_kind == "flat":
+        ckpt_hidden = meta.model_arch.hidden
+        requested_hidden = tuple(args.hidden_sizes)
+        if requested_hidden != ckpt_hidden:
+            # The checkpoint's architecture is load-bearing for state_dict shape
+            # match. Override silently but tell the user we did so.
+            print(
+                f"[train] --init-from: overriding --hidden-sizes "
+                f"{requested_hidden} with checkpoint architecture {ckpt_hidden}",
+                flush=True,
+            )
         print(
-            f"[train] --init-from: overriding --hidden-sizes "
-            f"{requested_hidden} with checkpoint architecture {ckpt_hidden}",
+            f"[train] warm-starting from {path} "
+            f"(encoder=flat, train_step={meta.train_step}, hidden={ckpt_hidden})",
             flush=True,
         )
-    print(
-        f"[train] warm-starting from {path} "
-        f"(train_step={meta.train_step}, hidden={ckpt_hidden})",
-        flush=True,
-    )
+    else:
+        print(
+            f"[train] warm-starting from {path} "
+            f"(encoder=graph, train_step={meta.train_step}, "
+            f"gnn_arch={meta.model_arch.gnn_arch})",
+            flush=True,
+        )
     return agent, meta
 
 
@@ -428,14 +494,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     init_agent, init_meta = _resolve_warm_start(args)
-    if init_meta is not None:
+    if init_meta is not None and init_meta.model_arch.encoder_kind == "flat":
         args.hidden_sizes = init_meta.model_arch.hidden
 
     cfg = _build_config(args)
     (output_dir / "config.json").write_text(
         json.dumps(
             _config_to_jsonable(
-                cfg, args.reward, args.stalemate_penalty, args.init_from
+                cfg,
+                args.reward,
+                args.stalemate_penalty,
+                args.init_from,
+                args.encoder,
             ),
             indent=2,
         )
@@ -448,19 +518,22 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Subprocess vec workers can't accept closure arguments, so the reward
-    # kind and the stalemate-penalty knob both ride through env vars.
-    # Setting them before SubprocVecEnv.spawn() lets workers pick up the
-    # same choices as the main-process env factory below.
+    # kind, the stalemate-penalty knob, and the encoder choice all ride
+    # through env vars. Setting them before SubprocVecEnv.spawn() lets
+    # workers pick up the same choices as the main-process env factory below.
     os.environ["CATAN_RL_REWARD"] = args.reward
     os.environ["CATAN_RL_STALEMATE_PENALTY"] = str(args.stalemate_penalty)
+    os.environ["CATAN_RL_ENCODER"] = args.encoder
 
     torch.manual_seed(cfg.seed)
-    model = MLPPolicyValue(
-        obs_dim=OBS_SHAPE[0],
-        action_dim=ACTION_SPACE_SIZE,
-        hidden=cfg.hidden_sizes,
+    encoder_kind: EncoderKind = args.encoder
+    obs_encoder = _make_obs_encoder(encoder_kind)
+    model = _build_model(encoder_kind, cfg.hidden_sizes, obs_encoder.out_shape)
+    learner = PolicyAgent(
+        model,
+        ActionEncoder(_PLAYER_IDS),
+        obs_encoder=obs_encoder,
     )
-    learner = PolicyAgent(model, ActionEncoder(_PLAYER_IDS))
     if init_agent is not None:
         # Warm-start: only the model weights carry over. The Trainer below
         # builds a fresh Adam and starts at global_step=0, and OpponentPool /
@@ -468,7 +541,9 @@ def main(argv: list[str] | None = None) -> int:
         # restart from scratch by construction, not by an explicit reset here.
         learner.load_state_dict(init_agent.state_dict())
     pool = _build_pool(args)
-    env_factory = _make_env_factory(args.reward, args.stalemate_penalty)
+    env_factory = _make_env_factory(
+        args.reward, args.stalemate_penalty, encoder_kind
+    )
 
     vec_factory = None
     if cfg.num_envs > 1:
@@ -513,6 +588,7 @@ def _config_to_jsonable(
     reward_kind: str,
     stalemate_penalty: float,
     init_from: Path | None,
+    encoder_kind: str,
 ) -> dict:
     """Flatten ``TrainConfig`` to a JSON-friendly dict for the run record."""
     return {
@@ -542,6 +618,7 @@ def _config_to_jsonable(
         "reward": reward_kind,
         "stalemate_penalty": stalemate_penalty,
         "init_from": str(init_from) if init_from is not None else None,
+        "encoder": encoder_kind,
     }
 
 

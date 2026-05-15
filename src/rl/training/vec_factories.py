@@ -19,13 +19,15 @@ Per-subprocess seats stay fixed for the run — opponent diversity (the other
 half of seat-rotation's motivation) comes from re-sampling the SubprocVecEnv,
 which the trainer doesn't do mid-run today.
 
-Reward selection
-----------------
+Reward / encoder selection
+--------------------------
 
 Subprocesses can't accept closure arguments, so the reward choice rides
-through the ``CATAN_RL_REWARD`` env var (``"sparse"`` / ``"shaped"``). The
-parent process sets it before spawning; subprocesses inherit it and the
-factory builds the matching :class:`RewardFn`. Default is sparse.
+through the ``CATAN_RL_REWARD`` env var (``"sparse"`` / ``"shaped"``) and
+the observation encoder choice rides through ``CATAN_RL_ENCODER``
+(``"flat"`` / ``"graph"``). The parent process sets both before
+spawning; subprocesses inherit them and each factory builds the matching
+encoder / :class:`RewardFn`. Defaults: sparse reward, flat encoder.
 """
 
 from __future__ import annotations
@@ -36,6 +38,9 @@ import random
 from domain.ids import PlayerID
 from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.random_agent import RandomAgent
+from rl.encoding.graph_observation import GraphObservationEncoder
+from rl.encoding.observation import FlatObservationEncoder
+from rl.encoding.protocol import ObservationEncoder
 from rl.env.catan_env import CatanEnv
 from rl.env.rewards import RewardFn, ShapedReward, SparseWinReward
 from rl.training.vec_env import WorkerBundle
@@ -49,6 +54,7 @@ __all__ = [
 _PLAYER_IDS: list[PlayerID] = [PlayerID(i) for i in range(1, 5)]
 _REWARD_ENV_VAR = "CATAN_RL_REWARD"
 _STALEMATE_PENALTY_ENV_VAR = "CATAN_RL_STALEMATE_PENALTY"
+_ENCODER_ENV_VAR = "CATAN_RL_ENCODER"
 
 
 def _learner_seat_for(seed: int) -> PlayerID:
@@ -76,8 +82,25 @@ def _make_reward_fn() -> RewardFn:
     return ShapedReward(stalemate_penalty=penalty)
 
 
+def _make_obs_encoder() -> ObservationEncoder:
+    """Pick the obs encoder based on env var (default: flat)."""
+    kind = os.environ.get(_ENCODER_ENV_VAR, "flat").lower()
+    if kind == "graph":
+        return GraphObservationEncoder()
+    if kind == "flat":
+        return FlatObservationEncoder()
+    raise ValueError(
+        f"{_ENCODER_ENV_VAR}={kind!r} is not a recognised encoder kind "
+        "(expected 'flat' or 'graph')"
+    )
+
+
 def _make_env(seed: int) -> CatanEnv:
-    return CatanEnv(seed=seed, reward_fn=_make_reward_fn())
+    return CatanEnv(
+        seed=seed,
+        obs_encoder=_make_obs_encoder(),
+        reward_fn=_make_reward_fn(),
+    )
 
 
 def random_opponents_factory(seed: int) -> WorkerBundle:

@@ -47,6 +47,7 @@ SNAPSHOT_EVERY="${SNAPSHOT_EVERY:-100000}"
 FINAL_EVAL_GAMES="${FINAL_EVAL_GAMES:-200}"
 REWARD="${REWARD:-shaped}"
 STALEMATE_PENALTY="${STALEMATE_PENALTY:-0.8}"
+ENCODER="${ENCODER:-flat}"
 POOL_BASELINES="${POOL_BASELINES:-3}"
 BASELINE_WEIGHT="${BASELINE_WEIGHT:-0.3}"
 ENTROPY_COEF="${ENTROPY_COEF:-0.03}"
@@ -62,7 +63,7 @@ RUN_DIR="runs/$NAME"
 mkdir -p "$RUN_DIR"
 
 echo "[train_overnight] run=$NAME total_steps=$TOTAL_STEPS num_envs=$NUM_ENVS"
-echo "[train_overnight] reward=$REWARD stalemate_penalty=$STALEMATE_PENALTY"
+echo "[train_overnight] encoder=$ENCODER reward=$REWARD stalemate_penalty=$STALEMATE_PENALTY"
 echo "[train_overnight] baselines=$POOL_BASELINES weight=$BASELINE_WEIGHT entropy=$ENTROPY_COEF"
 echo "[train_overnight] watchdog_zero_wins_iters=$WATCHDOG_ZERO_WINS_ITERS"
 if [ -n "$INIT_FROM" ]; then
@@ -83,6 +84,7 @@ fi
 python scripts/train.py \
     --total-steps "$TOTAL_STEPS" \
     --num-envs "$NUM_ENVS" \
+    --encoder "$ENCODER" \
     --reward "$REWARD" \
     --stalemate-penalty "$STALEMATE_PENALTY" \
     --pool-baselines "$POOL_BASELINES" \

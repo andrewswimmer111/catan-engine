@@ -1,4 +1,4 @@
-"""Adapter wiring :class:`MLPPolicyValue` into both the engine and the trainer.
+"""Adapter wiring a policy/value network into both the engine and the trainer.
 
 A :class:`PolicyAgent` exposes two entry points:
 
@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.distributions import Categorical
 
 from controller.session import GameSnapshot
@@ -33,7 +34,7 @@ from rl.agents.base import ActStep
 from rl.agents.heuristic_agent import heuristic_discard
 from rl.encoding.action import ActionEncoder, DiscardSentinel
 from rl.encoding.observation import FlatObservationEncoder
-from rl.models.mlp import MLPPolicyValue
+from rl.encoding.protocol import ObservationEncoder
 
 __all__ = ["PolicyAgent"]
 
@@ -43,9 +44,9 @@ class PolicyAgent:
 
     def __init__(
         self,
-        model: MLPPolicyValue,
+        model: nn.Module,
         action_encoder: ActionEncoder,
-        obs_encoder: FlatObservationEncoder | None = None,
+        obs_encoder: ObservationEncoder | None = None,
         device: str | torch.device = "cpu",
         *,
         stochastic_play: bool = False,
@@ -53,7 +54,9 @@ class PolicyAgent:
         self._device = torch.device(device)
         self._model = model.to(self._device)
         self._action_encoder = action_encoder
-        self._obs_encoder = obs_encoder or FlatObservationEncoder()
+        self._obs_encoder: ObservationEncoder = (
+            obs_encoder if obs_encoder is not None else FlatObservationEncoder()
+        )
         # ``choose`` defaults to deterministic argmax (the canonical eval
         # policy). Opponent-inference siblings flip this to sample from the
         # masked categorical so self-play opponents stay exploration-friendly
@@ -242,7 +245,7 @@ class PolicyAgent:
     # ------------------------------------------------------------------
 
     @property
-    def model(self) -> MLPPolicyValue:
+    def model(self) -> nn.Module:
         return self._model
 
     @property
@@ -254,7 +257,7 @@ class PolicyAgent:
         return self._action_encoder
 
     @property
-    def obs_encoder(self) -> FlatObservationEncoder:
+    def obs_encoder(self) -> ObservationEncoder:
         return self._obs_encoder
 
     def state_dict(self) -> dict[str, Any]:

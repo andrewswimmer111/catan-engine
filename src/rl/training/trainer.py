@@ -83,13 +83,13 @@ from controller.agents import Agent
 from domain.ids import PlayerID
 from rl.agents.policy_agent import PolicyAgent
 from rl.encoding.action import ACTION_SPACE_SIZE
-from rl.encoding.observation import OBS_LAYOUT_VERSION, OBS_SHAPE
 from rl.env.catan_env import CatanEnv
 from rl.replay.buffer import TrajectoryBuffer
 from rl.training.checkpoint import (
     ACTION_LAYOUT_VERSION,
     CheckpointMeta,
-    ModelArch,
+    model_arch_from,
+    obs_layout_version_for,
     compute_config_hash,
     save_checkpoint,
 )
@@ -141,9 +141,12 @@ class Trainer:
         self._player_ids: list[PlayerID] = list(probe_env.state.config.player_ids)
 
         self._rng = random.Random(cfg.seed)
+        # Obs dim is read from the learner's encoder so the trainer doesn't
+        # need to know which encoding (flat / graph) is in play.
+        self._obs_dim: int = int(learner.obs_encoder.out_shape[0])
         self._buffer = TrajectoryBuffer(
             capacity=cfg.rollout_steps,
-            obs_dim=OBS_SHAPE[0],
+            obs_dim=self._obs_dim,
             action_dim=ACTION_SPACE_SIZE,
         )
         self._optimizer = torch.optim.Adam(
@@ -160,10 +163,9 @@ class Trainer:
         self._last_snapshot_step: int = 0
         self._n_snapshots: int = 0
         self._config_hash: str = compute_config_hash(cfg)
-        self._model_arch = ModelArch(
-            obs_dim=OBS_SHAPE[0],
-            action_dim=ACTION_SPACE_SIZE,
-            hidden=tuple(learner.model.hidden),
+        self._model_arch = model_arch_from(learner.model)
+        self._obs_layout_version: int = obs_layout_version_for(
+            self._model_arch.encoder_kind
         )
 
         # Vec-env path is constructed lazily on the first rollout so a Trainer
@@ -501,7 +503,7 @@ class Trainer:
 
     def _build_meta(self) -> CheckpointMeta:
         return CheckpointMeta(
-            obs_layout_version=OBS_LAYOUT_VERSION,
+            obs_layout_version=self._obs_layout_version,
             action_layout_version=ACTION_LAYOUT_VERSION,
             model_arch=self._model_arch,
             train_step=self._global_step,

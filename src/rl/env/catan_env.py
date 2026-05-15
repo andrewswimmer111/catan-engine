@@ -32,6 +32,7 @@ from rl.acting_player import acting_player
 from rl.agents.heuristic_agent import heuristic_discard
 from rl.encoding.action import ActionEncoder, DiscardSentinel
 from rl.encoding.observation import FlatObservationEncoder
+from rl.encoding.protocol import ObservationEncoder
 from rl.env.rewards import RewardFn, SparseWinReward
 from rl.env.spec import Info
 
@@ -53,7 +54,7 @@ class CatanEnv:
         self,
         config: GameConfig | None = None,
         seed: int | None = None,
-        obs_encoder: FlatObservationEncoder | None = None,
+        obs_encoder: ObservationEncoder | None = None,
         action_encoder: ActionEncoder | None = None,
         reward_fn: RewardFn | None = None,
     ) -> None:
@@ -64,7 +65,9 @@ class CatanEnv:
         self._state: GameState = self._engine.new_game(cfg)
         self._last_events: list[GameEvent] = []
 
-        self._obs_encoder = obs_encoder or FlatObservationEncoder()
+        self._obs_encoder: ObservationEncoder = (
+            obs_encoder if obs_encoder is not None else FlatObservationEncoder()
+        )
         # If the caller supplied an action encoder we trust their seat mapping;
         # otherwise build one matching the current config so steal indices line
         # up with config.player_ids.
@@ -148,7 +151,7 @@ class CatanEnv:
         return self._state
 
     @property
-    def obs_encoder(self) -> FlatObservationEncoder:
+    def obs_encoder(self) -> ObservationEncoder:
         return self._obs_encoder
 
     @property

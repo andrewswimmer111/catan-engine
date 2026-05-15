@@ -71,6 +71,8 @@ __all__ = [
     "compute_config_hash",
     "load_checkpoint",
     "save_checkpoint",
+    "model_arch_from",
+    "obs_layout_version_for",
 ]
 
 
@@ -148,6 +150,43 @@ class CheckpointMeta:
 
 class IncompatibleCheckpointError(RuntimeError):
     """Raised when a checkpoint's layout versions don't match the loader."""
+
+
+def model_arch_from(model: torch.nn.Module) -> ModelArch:
+    """Derive a :class:`ModelArch` spec from a constructed policy/value model.
+
+    Single source of truth for "what kind of model is this" — the trainer
+    and the warm-start path both consult this rather than inspecting
+    ``model`` directly, so adding a new encoder kind only touches this
+    function plus the loader dispatch in :func:`load_checkpoint`.
+    """
+    if isinstance(model, MLPPolicyValue):
+        return ModelArch(
+            obs_dim=model.obs_dim,
+            action_dim=model.action_dim,
+            encoder_kind="flat",
+            hidden=tuple(model.hidden),
+        )
+    if isinstance(model, GNNPolicyValue):
+        return ModelArch(
+            obs_dim=model.obs_dim,
+            action_dim=model.action_dim,
+            encoder_kind="graph",
+            gnn_arch=model.arch,
+        )
+    raise TypeError(
+        f"don't know how to build ModelArch for {type(model).__name__}; "
+        "extend rl.training.checkpoint.model_arch_from to support it."
+    )
+
+
+def obs_layout_version_for(kind: EncoderKind) -> int:
+    """Return the current obs-layout version constant matching ``kind``.
+
+    Exposed so callers (trainer, scripts) don't reach into the loader's
+    private dispatch table when building :class:`CheckpointMeta`.
+    """
+    return _expected_obs_layout_version(kind)
 
 
 def compute_config_hash(train_cfg: TrainConfig) -> str:
