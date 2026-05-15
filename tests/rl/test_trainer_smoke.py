@@ -126,6 +126,68 @@ def test_trainer_save_checkpoint_round_trip(tmp_path: Path) -> None:
         assert torch.equal(v, loaded.state_dict()[k]), f"mismatch on {k}"
 
 
+def test_trainer_warm_start_copies_weights_and_resets_step(tmp_path: Path) -> None:
+    """Warm-start: ``learner.load_state_dict(load_checkpoint(path).state_dict())``.
+
+    Mirrors the ``--init-from`` flow in ``scripts/train.py``: model weights
+    carry over from a saved checkpoint into a freshly-built learner, but the
+    Trainer constructed around that learner starts at ``global_step=0`` with
+    a fresh optimizer. Pool and scheduler state are not in scope here.
+    """
+    source = _make_learner()
+    cfg = TrainConfig(
+        ppo=PPOConfig(n_epochs=1, minibatch_size=32, target_kl=None),
+        rollout_steps=64,
+        eval_every=0,
+        log_every=1,
+        seed=11,
+    )
+    src_trainer = Trainer(
+        env_factory=_env_factory,
+        learner=source,
+        opponent_pool=_make_pool(seed=11),
+        cfg=cfg,
+        log_dir=None,
+    )
+    src_trainer.train(total_steps=64)
+    assert src_trainer.global_step >= 64
+    saved_state = {k: v.clone() for k, v in source.state_dict().items()}
+    ckpt = tmp_path / "src.pt"
+    src_trainer.save_checkpoint(ckpt)
+
+    # Build a fresh learner and perturb it so it can't match the source
+    # purely by virtue of the helper's fixed seed.
+    warm = _make_learner()
+    with torch.no_grad():
+        for p in warm.model.parameters():
+            p.add_(1.0)
+    assert any(
+        not torch.equal(saved_state[k], warm.state_dict()[k]) for k in saved_state
+    ), "perturbation didn't move weights — test setup is broken"
+
+    # The warm-start step itself.
+    loaded, _meta = load_checkpoint(ckpt)
+    warm.load_state_dict(loaded.state_dict())
+
+    for k, v in saved_state.items():
+        assert torch.equal(v, warm.state_dict()[k]), f"mismatch on {k}"
+
+    # New Trainer around the warm-started learner: step counter resets, and
+    # the trainer ctor doesn't mutate the model.
+    warm_trainer = Trainer(
+        env_factory=_env_factory,
+        learner=warm,
+        opponent_pool=_make_pool(seed=99),
+        cfg=cfg,
+        log_dir=None,
+    )
+    assert warm_trainer.global_step == 0
+    for k, v in saved_state.items():
+        assert torch.equal(v, warm.state_dict()[k]), (
+            f"Trainer init mutated weights on {k}"
+        )
+
+
 def test_trainer_runs_eval_without_errors(tmp_path: Path) -> None:
     """Eval cadence on: the trainer should produce an eval scalar."""
     learner = _make_learner()

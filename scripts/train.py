@@ -59,6 +59,7 @@ from rl.evaluation.scheduler import (
     make_bench_vs_random,
 )
 from rl.models.mlp import MLPPolicyValue
+from rl.training.checkpoint import CheckpointMeta, load_checkpoint
 from rl.training.config import DEFAULT_BASELINE_CONFIG, PPOConfig, TrainConfig
 from rl.training.opponent_pool import OpponentPool
 from rl.training.trainer import Trainer
@@ -113,6 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="root for tb/, snapshots/, elo.json. Default: runs/<timestamp>",
+    )
+
+    # Warm-start.
+    p.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="path to a prior checkpoint (.pt). Copies model weights into the "
+             "freshly-constructed learner; optimizer, global_step, OpponentPool, "
+             "and EvalScheduler all start fresh. The checkpoint's hidden-sizes "
+             "override --hidden-sizes (with a heads-up if they differ).",
     )
 
     # PPO update hyperparameters.
@@ -297,6 +309,38 @@ def _build_config(args: argparse.Namespace) -> TrainConfig:
     )
 
 
+def _resolve_warm_start(
+    args: argparse.Namespace,
+) -> tuple[PolicyAgent | None, CheckpointMeta | None]:
+    """Load the ``--init-from`` checkpoint, if any, and log the inheritance.
+
+    Returns ``(agent, meta)`` on success or ``(None, None)`` when no
+    warm-start was requested. The agent is held only to forward its
+    ``state_dict`` into the freshly-constructed learner below — its own
+    encoder, device, and life-cycle are otherwise discarded.
+    """
+    if args.init_from is None:
+        return None, None
+    path = Path(args.init_from)
+    agent, meta = load_checkpoint(path)
+    ckpt_hidden = meta.model_arch.hidden
+    requested_hidden = tuple(args.hidden_sizes)
+    if requested_hidden != ckpt_hidden:
+        # The checkpoint's architecture is load-bearing for state_dict shape
+        # match. Override silently but tell the user we did so.
+        print(
+            f"[train] --init-from: overriding --hidden-sizes "
+            f"{requested_hidden} with checkpoint architecture {ckpt_hidden}",
+            flush=True,
+        )
+    print(
+        f"[train] warm-starting from {path} "
+        f"(train_step={meta.train_step}, hidden={ckpt_hidden})",
+        flush=True,
+    )
+    return agent, meta
+
+
 def _build_pool(args: argparse.Namespace) -> OpponentPool:
     """Construct the OpponentPool, optionally seeded with heuristic baselines."""
     rng = random.Random(args.seed)
@@ -377,10 +421,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if args.init_from is not None and not Path(args.init_from).is_file():
+        print(
+            f"error: --init-from path does not exist: {args.init_from}",
+            file=sys.stderr,
+        )
+        return 2
+    init_agent, init_meta = _resolve_warm_start(args)
+    if init_meta is not None:
+        args.hidden_sizes = init_meta.model_arch.hidden
+
     cfg = _build_config(args)
     (output_dir / "config.json").write_text(
         json.dumps(
-            _config_to_jsonable(cfg, args.reward, args.stalemate_penalty),
+            _config_to_jsonable(
+                cfg, args.reward, args.stalemate_penalty, args.init_from
+            ),
             indent=2,
         )
     )
@@ -405,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
         hidden=cfg.hidden_sizes,
     )
     learner = PolicyAgent(model, ActionEncoder(_PLAYER_IDS))
+    if init_agent is not None:
+        # Warm-start: only the model weights carry over. The Trainer below
+        # builds a fresh Adam and starts at global_step=0, and OpponentPool /
+        # EvalScheduler are constructed below — all of those state machines
+        # restart from scratch by construction, not by an explicit reset here.
+        learner.load_state_dict(init_agent.state_dict())
     pool = _build_pool(args)
     env_factory = _make_env_factory(args.reward, args.stalemate_penalty)
 
@@ -447,7 +509,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _config_to_jsonable(
-    cfg: TrainConfig, reward_kind: str, stalemate_penalty: float
+    cfg: TrainConfig,
+    reward_kind: str,
+    stalemate_penalty: float,
+    init_from: Path | None,
 ) -> dict:
     """Flatten ``TrainConfig`` to a JSON-friendly dict for the run record."""
     return {
@@ -476,6 +541,7 @@ def _config_to_jsonable(
         "num_envs": cfg.num_envs,
         "reward": reward_kind,
         "stalemate_penalty": stalemate_penalty,
+        "init_from": str(init_from) if init_from is not None else None,
     }
 
 
