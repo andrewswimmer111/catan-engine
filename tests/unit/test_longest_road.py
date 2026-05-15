@@ -32,42 +32,40 @@ def _minimal_state() -> GameState:
     )
 
 
-def _shared_v(topo, e1: EdgeID, e2: EdgeID) -> VertexID | None:
-    a1, a2 = topo.edges[e1].vertices
-    b1, b2 = topo.edges[e2].vertices
-    for x in (a1, a2):
-        if x == b1 or x == b2:
-            return x
-    return None
+def _other_v(topo, eid: EdgeID, at: VertexID) -> VertexID:
+    v1, v2 = topo.edges[eid].vertices
+    if at == v1:
+        return v2
+    if at == v2:
+        return v1
+    raise ValueError(f"vertex {int(at)} not incident to edge {int(eid)}")
 
 
 def _path_of_length(
     s: GameState, start: EdgeID, length: int, pid: PlayerID
 ) -> list[EdgeID] | None:
-    """DFS: first simple path of ``length`` edges from ``start`` (player may pass all vertices)."""
+    """DFS: first simple path of ``length`` edges from ``start``."""
     topo = s.topology
     found: list[EdgeID] | None = None
 
-    def walk(cur: EdgeID, visited: frozenset[EdgeID], chain: list[EdgeID]) -> None:
+    def walk(cur_v: VertexID, visited: frozenset[EdgeID], chain: list[EdgeID]) -> None:
         nonlocal found
         if found is not None:
             return
         if len(chain) == length:
             found = list(chain)
             return
-        e = topo.edges[cur]
-        for nxt in e.adjacent_edges:
+        b = s.occupancy.buildings.get(cur_v)
+        if b is not None and b[0] != pid:
+            return
+        for nxt in topo.vertices[cur_v].adjacent_edges:
             if nxt in visited:
                 continue
-            v = _shared_v(topo, cur, nxt)
-            if v is None:
-                continue
-            b = s.occupancy.buildings.get(v)
-            if b is not None and b[0] != pid:
-                continue
-            walk(nxt, visited | {nxt}, chain + [nxt])
+            walk(_other_v(topo, nxt, cur_v), visited | {nxt}, chain + [nxt])
 
-    walk(start, frozenset({start}), [start])
+    v1, v2 = topo.edges[start].vertices
+    walk(v1, frozenset({start}), [start])
+    walk(v2, frozenset({start}), [start])
     return found
 
 
@@ -97,6 +95,25 @@ def test_two_roads_from_one_intersection_forms_path_of_at_most_two_edges() -> No
     n1 = min(s.topology.edges[e0].adjacent_edges)
     s.occupancy.roads[e0] = pid
     s.occupancy.roads[n1] = pid
+    assert lr.compute_longest_road(s, pid) == 2
+
+
+def test_three_spokes_at_one_vertex_counts_as_two_not_three() -> None:
+    """A 3-spoke intersection (T/Y shape) has longest simple road length 2."""
+    s = _minimal_state()
+    pid = PlayerID(0)
+
+    spoke_edges: list[EdgeID] | None = None
+    for _, vertex in sorted(s.topology.vertices.items(), key=lambda item: int(item[0])):
+        if len(vertex.adjacent_edges) >= 3:
+            spoke_edges = sorted(vertex.adjacent_edges, key=int)[:3]
+            break
+
+    assert spoke_edges is not None, "expected at least one interior degree-3 vertex"
+    for eid in spoke_edges:
+        s.occupancy.roads[eid] = pid
+
+    # In a T/Y shape, any simple path can take at most two spokes.
     assert lr.compute_longest_road(s, pid) == 2
 
 

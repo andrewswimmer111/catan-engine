@@ -25,39 +25,45 @@ def _my_road_ids(state: GameState, player: PlayerID) -> frozenset[EdgeID]:
     )
 
 
-def _shared_vertex(topology: BoardTopology, e1: EdgeID, e2: EdgeID) -> VertexID | None:
-    a1, a2 = topology.edges[e1].vertices
-    b1, b2 = topology.edges[e2].vertices
-    for x in (a1, a2):
-        if x == b1 or x == b2:
-            return x
-    return None
+def _other_vertex(topology: BoardTopology, edge_id: EdgeID, at: VertexID) -> VertexID:
+    """Return the opposite endpoint of ``edge_id`` from ``at``."""
+    v1, v2 = topology.edges[edge_id].vertices
+    if at == v1:
+        return v2
+    if at == v2:
+        return v1
+    raise ValueError(f"vertex {int(at)} is not incident to edge {int(edge_id)}")
 
 
-def _dfs(
+def _max_extension_from_vertex(
     state: GameState,
     player: PlayerID,
     topology: BoardTopology,
     my_edges: frozenset[EdgeID],
-    cur: EdgeID,
+    cur_vertex: VertexID,
     visited: frozenset[EdgeID],
 ) -> int:
-    """Max path *length in edges* along a path that starts on ``cur`` and only uses new edges."""
-    e = topology.edges[cur]
-    best_len = 1
-    for nxt in e.adjacent_edges:
+    """Max additional edges from ``cur_vertex`` without reusing road edges."""
+    # Opponent buildings block traversal through this vertex. The path may
+    # end here, but cannot extend further.
+    if not _passable_for_road(state, cur_vertex, player):
+        return 0
+
+    best_extra = 0
+    for nxt in topology.vertices[cur_vertex].adjacent_edges:
         if nxt not in my_edges or nxt in visited:
             continue
-        v = _shared_vertex(topology, cur, nxt)
-        if v is None:
-            continue
-        if not _passable_for_road(state, v, player):
-            continue
-        sub = _dfs(
-            state, player, topology, my_edges, nxt, frozenset(visited | {nxt})
+        nxt_vertex = _other_vertex(topology, nxt, cur_vertex)
+        extra = 1 + _max_extension_from_vertex(
+            state,
+            player,
+            topology,
+            my_edges,
+            nxt_vertex,
+            frozenset(visited | {nxt}),
         )
-        best_len = max(best_len, 1 + sub)
-    return best_len
+        best_extra = max(best_extra, extra)
+    return best_extra
 
 
 def compute_longest_road(state: GameState, player_id: PlayerID) -> int:
@@ -73,8 +79,20 @@ def compute_longest_road(state: GameState, player_id: PlayerID) -> int:
     topo = state.topology
     best = 0
     for start in my_edges:
-        l = _dfs(state, player_id, topo, my_edges, start, frozenset({start}))
-        best = max(best, l)
+        v1, v2 = topo.edges[start].vertices
+        # Start from both edge orientations so extension is constrained to
+        # the current path endpoint instead of "jumping" via shared adjacency.
+        best = max(
+            best,
+            1
+            + _max_extension_from_vertex(
+                state, player_id, topo, my_edges, v1, frozenset({start})
+            ),
+            1
+            + _max_extension_from_vertex(
+                state, player_id, topo, my_edges, v2, frozenset({start})
+            ),
+        )
     return best
 
 
