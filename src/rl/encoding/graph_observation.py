@@ -86,6 +86,9 @@ __all__ = [
     "N_EDGES",
     "N_PLAYERS",
     "N_EDGE_TYPES",
+    "VERTEX_SETTLE_SLOT_OFFSET",
+    "VERTEX_CITY_SLOT_OFFSET",
+    "EDGE_ROAD_SLOT_OFFSET",
 ]
 
 
@@ -191,13 +194,13 @@ _TILE_ROBBER_OFFSET: Final[int] = _TILE_CHIT_OFFSET + 11
 # Vertex feature: [port(7), empty(1), settle_owner(4), city_owner(4)]
 VERTEX_FEAT_DIM: Final[int] = (len(_PORT_TYPES) + 1) + 1 + N_PLAYERS + N_PLAYERS  # 16
 _VERTEX_EMPTY_OFFSET: Final[int] = len(_PORT_TYPES) + 1
-_VERTEX_SETTLE_OFFSET: Final[int] = _VERTEX_EMPTY_OFFSET + 1
-_VERTEX_CITY_OFFSET: Final[int] = _VERTEX_SETTLE_OFFSET + N_PLAYERS
+VERTEX_SETTLE_SLOT_OFFSET: Final[int] = _VERTEX_EMPTY_OFFSET + 1
+VERTEX_CITY_SLOT_OFFSET: Final[int] = VERTEX_SETTLE_SLOT_OFFSET + N_PLAYERS
 
 # Edge feature: [empty(1), road_owner(4)]
 EDGE_FEAT_DIM: Final[int] = 1 + N_PLAYERS  # 5
 _EDGE_EMPTY_OFFSET: Final[int] = 0
-_EDGE_OWNER_OFFSET: Final[int] = 1
+EDGE_ROAD_SLOT_OFFSET: Final[int] = 1
 
 # Player feature row (per seat, 27 slots total):
 #   resources(5), total_res(1), dev_in_hand_by_type(5), dev_in_hand_count(1),
@@ -450,9 +453,9 @@ def _write_vertex_block(
             # encoder's behaviour for the same case.
             continue
         if btype is BuildingType.SETTLEMENT:
-            out[base + _VERTEX_SETTLE_OFFSET + seat] = 1.0
+            out[base + VERTEX_SETTLE_SLOT_OFFSET + seat] = 1.0
         else:
-            out[base + _VERTEX_CITY_OFFSET + seat] = 1.0
+            out[base + VERTEX_CITY_SLOT_OFFSET + seat] = 1.0
 
 
 def _write_edge_block(
@@ -469,7 +472,7 @@ def _write_edge_block(
         seat = seat_of_player.get(owner)
         if seat is None:
             continue
-        out[base + _EDGE_OWNER_OFFSET + seat] = 1.0
+        out[base + EDGE_ROAD_SLOT_OFFSET + seat] = 1.0
 
 
 def _write_player_block(

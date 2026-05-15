@@ -9,6 +9,7 @@ version = "0.1.0"
 [project.optional-dependencies]
 rl = [
     "torch>=2.2",
+    "torch-geometric>=2.5",
     "numpy>=1.26",
     "tensorboard>=2.16",
     "hypothesis>=6.100",
