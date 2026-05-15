@@ -32,19 +32,13 @@ class TimelineWidget(QWidget):
         self._slider.setMinimum(0)
 
         self._label = QLabel()
-        self._label.setMinimumWidth(280)
-
-        row = QHBoxLayout()
-        row.addWidget(self._btn_start)
-        row.addWidget(self._btn_back)
-        row.addWidget(self._slider, stretch=1)
-        row.addWidget(self._btn_forward)
-        row.addWidget(self._btn_end)
-        row.addWidget(self._label)
+        self._label.setAlignment(Qt.AlignCenter)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
-        layout.addLayout(row)
+        layout.setSpacing(2)
+        layout.addLayout(self._build_controls_row())
+        layout.addWidget(self._label)
 
         self._btn_start.clicked.connect(lambda: self._do_jump(0))
         self._btn_back.clicked.connect(
@@ -103,6 +97,16 @@ class TimelineWidget(QWidget):
     def _on_slider_changed(self, value: int) -> None:
         if value != self._session.current().step_index:
             self._do_jump(value)
+
+    def _build_controls_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._btn_start)
+        row.addWidget(self._btn_back)
+        row.addWidget(self._slider, stretch=1)
+        row.addWidget(self._btn_forward)
+        row.addWidget(self._btn_end)
+        return row
 
     def _sync_controls(self, snap: GameSnapshot) -> None:
         total = len(self._session.history()) - 1

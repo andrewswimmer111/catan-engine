@@ -37,6 +37,12 @@ from serialization.replay import load_replay, save_replay
 
 
 class MainWindow(QMainWindow):
+
+    _TIMELINE_TO_BOTTOM_DOCK_GAP_PX = 8
+    _BOTTOM_DOCK_MIN_HEIGHT_PX = 220
+    _MAIN_SPLITTER_STRETCH = (4, 1)
+    _MAIN_SPLITTER_INITIAL_SIZES = (820, 180)
+
     def __init__(self, session: GameSession) -> None:
         super().__init__()
         self._session = session
@@ -49,58 +55,46 @@ class MainWindow(QMainWindow):
         self._timeline = TimelineWidget(session)
         self._event_log = EventLogWidget(session)
 
-        right_pane = QWidget()
-        right_layout = QVBoxLayout(right_pane)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
-        right_layout.addWidget(self._panel, stretch=2)
-        right_layout.addWidget(self._trade, stretch=1)
-
-        splitter = QSplitter()
-        splitter.addWidget(self._canvas)
-        splitter.addWidget(right_pane)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([750, 250])
-
         central = QWidget()
         central_layout = QVBoxLayout(central)
-        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setContentsMargins(
+            0, 0, 0, self._TIMELINE_TO_BOTTOM_DOCK_GAP_PX
+        )
         central_layout.setSpacing(0)
-        central_layout.addWidget(splitter, stretch=1)
-        central_layout.addWidget(self._timeline)
+        central_layout.addWidget(self._build_main_splitter(), stretch=1)
         self.setCentralWidget(central)
 
-        # Player panels dock (left edge)
-        player_ids = sorted(session.current().state.players.keys())
+        # Player panels dock (left edge). Panels themselves are (re)built
+        # on every session swap by ``_rebuild_player_panels`` — see the
+        # _replace_session path for why.
         self._panels: dict[PlayerID, PlayerPanel] = {}
         players_container = QWidget()
-        players_layout = QVBoxLayout(players_container)
-        players_layout.setContentsMargins(4, 4, 4, 4)
-        players_layout.setSpacing(4)
-        for pid in player_ids:
-            panel = PlayerPanel(int(pid))
-            self._panels[pid] = panel
-            players_layout.addWidget(panel)
-        players_layout.addStretch()
+        self._players_layout = QVBoxLayout(players_container)
+        self._players_layout.setContentsMargins(4, 4, 4, 4)
+        self._players_layout.setSpacing(4)
 
         players_dock = QDockWidget("Players", self)
         players_dock.setWidget(players_container)
         players_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.LeftDockWidgetArea, players_dock)
 
-        # Event log dock (bottom)
+        player_ids = sorted(session.current().state.players.keys())
+        self._rebuild_player_panels(player_ids)
+
+        # Event log dock (bottom-left half)
         log_dock = QDockWidget("Event Log", self)
         log_dock.setWidget(self._event_log)
         log_dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
         self.addDockWidget(Qt.BottomDockWidgetArea, log_dock)
 
         # Policy overlay dock — populated only when an RL replay is loaded.
+        # Shares the bottom area with the event log, split horizontally 50/50.
         self._policy_overlay = PolicyOverlayWidget()
         overlay_dock = QDockWidget("Policy Overlay", self)
         overlay_dock.setWidget(self._policy_overlay)
-        overlay_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
-        self.addDockWidget(Qt.RightDockWidgetArea, overlay_dock)
+        overlay_dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
+        self.addDockWidget(Qt.BottomDockWidgetArea, overlay_dock)
+        self._configure_bottom_docks(log_dock, overlay_dock)
 
         self._canvas.vertex_clicked.connect(self._on_vertex_clicked)
         self._canvas.edge_clicked.connect(self._on_edge_clicked)
@@ -120,6 +114,39 @@ class MainWindow(QMainWindow):
         self.statusBar()
         self._render(session.current())
 
+    def _configure_bottom_docks(
+        self, log_dock: QDockWidget, overlay_dock: QDockWidget
+    ) -> None:
+        self.splitDockWidget(log_dock, overlay_dock, Qt.Horizontal)
+        self.resizeDocks([log_dock, overlay_dock], [1, 1], Qt.Horizontal)
+
+        # Minimum heights reliably enforce a taller shared bottom dock row.
+        for dock in (log_dock, overlay_dock):
+            dock.setMinimumHeight(self._BOTTOM_DOCK_MIN_HEIGHT_PX)
+
+    def _build_main_splitter(self) -> QSplitter:
+        board_pane = QWidget()
+        board_layout = QVBoxLayout(board_pane)
+        board_layout.setContentsMargins(0, 0, 0, 0)
+        board_layout.setSpacing(0)
+        board_layout.addWidget(self._canvas, stretch=1)
+        board_layout.addWidget(self._timeline)
+
+        right_pane = QWidget()
+        right_layout = QVBoxLayout(right_pane)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self._panel, stretch=2)
+        right_layout.addWidget(self._trade, stretch=1)
+
+        splitter = QSplitter()
+        splitter.addWidget(board_pane)
+        splitter.addWidget(right_pane)
+        splitter.setStretchFactor(0, self._MAIN_SPLITTER_STRETCH[0])
+        splitter.setStretchFactor(1, self._MAIN_SPLITTER_STRETCH[1])
+        splitter.setSizes(list(self._MAIN_SPLITTER_INITIAL_SIZES))
+        return splitter
+
     # ------------------------------------------------------------------
     # Menu, toolbar & shortcuts
     # ------------------------------------------------------------------
@@ -138,13 +165,11 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(QLabel("View as:  "))
         self._view_combo = QComboBox()
-        self._view_combo.addItem("GOD")
-        for pid in player_ids:
-            self._view_combo.addItem(f"P{int(pid)}")
         toolbar.addWidget(self._view_combo)
         self._view_combo.currentTextChanged.connect(
             lambda _: self._refresh_player_panels(self._session.current())
         )
+        self._populate_view_combo(player_ids)
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Seats:  "))
@@ -173,6 +198,41 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Right"), self).activated.connect(self._timeline.step_forward)
         QShortcut(QKeySequence("Home"), self).activated.connect(self._timeline.jump_start)
         QShortcut(QKeySequence("End"), self).activated.connect(self._timeline.jump_end)
+
+    # ------------------------------------------------------------------
+    # Per-session widgets (panels + view dropdown)
+    # ------------------------------------------------------------------
+
+    def _rebuild_player_panels(self, player_ids: list[PlayerID]) -> None:
+        """Tear down any existing player panels and rebuild for ``player_ids``.
+
+        Replays may use a different PlayerID set than the initial session
+        (e.g. RL episodes use 1..4 while the GUI's fresh game historically
+        used 0..3). Without rebuilding, ``self._panels`` would stay keyed
+        by stale IDs and panel lookups against the new state would miss.
+        """
+        while self._players_layout.count():
+            item = self._players_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._panels.clear()
+        for pid in player_ids:
+            panel = PlayerPanel(int(pid))
+            self._panels[pid] = panel
+            self._players_layout.addWidget(panel)
+        self._players_layout.addStretch()
+
+    def _populate_view_combo(self, player_ids: list[PlayerID]) -> None:
+        """Replace the View-as dropdown's items to match ``player_ids``."""
+        self._view_combo.blockSignals(True)
+        self._view_combo.clear()
+        self._view_combo.addItem("GOD")
+        for pid in player_ids:
+            self._view_combo.addItem(f"P{int(pid)}")
+        self._view_combo.setCurrentIndex(0)
+        self._view_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Replay I/O
@@ -217,6 +277,9 @@ class MainWindow(QMainWindow):
         self._timeline.set_session(session)
         self._event_log.set_session(session)
         self._orchestrator.set_session(session)
+        player_ids = sorted(session.current().state.players.keys())
+        self._rebuild_player_panels(player_ids)
+        self._populate_view_combo(player_ids)
         self._render(session.current())
 
     # ------------------------------------------------------------------

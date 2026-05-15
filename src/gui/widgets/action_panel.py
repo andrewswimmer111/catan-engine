@@ -34,6 +34,11 @@ _BUTTON_GROUPS: dict[str, tuple[type[Action], ...]] = {
     "Trade": (A.MaritimeTradeAction, A.ProposeDomesticTradeAction),
 }
 
+# Max buttons per row inside a group. Groups wider than this wrap onto
+# additional rows so the action panel can stay narrow and give the board
+# canvas more horizontal space.
+_BUTTONS_PER_ROW = 3
+
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])")
 
 
@@ -62,17 +67,18 @@ class ActionPanel(QWidget):
         for group_label, group_types in _BUTTON_GROUPS.items():
             label = QLabel(f"<b>{group_label}</b>")
             btn_layout.addWidget(label)
-            row = QHBoxLayout()
-            row.setSpacing(4)
-            row.setContentsMargins(0, 0, 0, 0)
-            for cls in group_types:
-                btn = QPushButton(_label(cls))
-                btn.setEnabled(False)
-                btn.clicked.connect(lambda checked=False, c=cls: self._on_button(c))
-                row.addWidget(btn)
-                self._buttons[cls] = btn
-            row.addStretch()
-            btn_layout.addLayout(row)
+            for start in range(0, len(group_types), _BUTTONS_PER_ROW):
+                row = QHBoxLayout()
+                row.setSpacing(4)
+                row.setContentsMargins(0, 0, 0, 0)
+                for cls in group_types[start : start + _BUTTONS_PER_ROW]:
+                    btn = QPushButton(_label(cls))
+                    btn.setEnabled(False)
+                    btn.clicked.connect(lambda checked=False, c=cls: self._on_button(c))
+                    row.addWidget(btn)
+                    self._buttons[cls] = btn
+                row.addStretch()
+                btn_layout.addLayout(row)
         layout.addWidget(btn_box)
 
         self._show_raw = QCheckBox("Show raw list")
