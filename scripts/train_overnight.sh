@@ -52,6 +52,10 @@ BASELINE_WEIGHT="${BASELINE_WEIGHT:-0.3}"
 ENTROPY_COEF="${ENTROPY_COEF:-0.03}"
 PRINT_EVERY="${PRINT_EVERY:-25}"
 WATCHDOG_ZERO_WINS_ITERS="${WATCHDOG_ZERO_WINS_ITERS:-200}"
+# Warm-start curriculum: set INIT_FROM=path/to/prev/final.pt and typically
+# bump BASELINE_WEIGHT (0.5–0.7) and drop LR (e.g. 1e-4) for refinement.
+INIT_FROM="${INIT_FROM:-}"
+LR="${LR:-}"
 
 NAME="overnight_$(date +%Y%m%d_%H%M)"
 RUN_DIR="runs/$NAME"
@@ -61,7 +65,20 @@ echo "[train_overnight] run=$NAME total_steps=$TOTAL_STEPS num_envs=$NUM_ENVS"
 echo "[train_overnight] reward=$REWARD stalemate_penalty=$STALEMATE_PENALTY"
 echo "[train_overnight] baselines=$POOL_BASELINES weight=$BASELINE_WEIGHT entropy=$ENTROPY_COEF"
 echo "[train_overnight] watchdog_zero_wins_iters=$WATCHDOG_ZERO_WINS_ITERS"
+if [ -n "$INIT_FROM" ]; then
+    echo "[train_overnight] warm-start init_from=$INIT_FROM lr=${LR:-default}"
+fi
 echo "[train_overnight] output=$RUN_DIR"
+
+# Optional flags only land on the command line when set, so cold-start runs
+# stay byte-identical to the prior invocation.
+EXTRA_ARGS=()
+if [ -n "$INIT_FROM" ]; then
+    EXTRA_ARGS+=(--init-from "$INIT_FROM")
+fi
+if [ -n "$LR" ]; then
+    EXTRA_ARGS+=(--lr "$LR")
+fi
 
 python scripts/train.py \
     --total-steps "$TOTAL_STEPS" \
@@ -76,6 +93,7 @@ python scripts/train.py \
     --eval-every "$EVAL_EVERY" --eval-games "$EVAL_GAMES" \
     --snapshot-every "$SNAPSHOT_EVERY" \
     --output-dir "$RUN_DIR" \
+    "${EXTRA_ARGS[@]}" \
     2>&1 | tee "$RUN_DIR/train.log"
 
 echo "[train_overnight] training done — running final tournament vs random"
