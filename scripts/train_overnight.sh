@@ -95,7 +95,7 @@ python scripts/train.py \
     --eval-every "$EVAL_EVERY" --eval-games "$EVAL_GAMES" \
     --snapshot-every "$SNAPSHOT_EVERY" \
     --output-dir "$RUN_DIR" \
-    "${EXTRA_ARGS[@]}" \
+    ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     2>&1 | tee "$RUN_DIR/train.log"
 
 echo "[train_overnight] training done — running final tournament vs random"
