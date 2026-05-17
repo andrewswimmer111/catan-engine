@@ -38,6 +38,7 @@ from typing import Callable
 from controller.agents import Agent
 from domain.ids import PlayerID
 from rl.agents.heuristic_agent import HeuristicAgent
+from rl.agents.hybrid_agent import PlacementOverrideAgent
 from rl.agents.policy_agent import PolicyAgent
 from rl.agents.random_agent import RandomAgent
 from rl.env.catan_env import CatanEnv
@@ -85,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="if set, sample-game replays are written here",
+    )
+    p_eval.add_argument(
+        "--placement-agent",
+        choices=("self", "heuristic"),
+        default="self",
+        help="who plays the learner's opening placements (INITIAL_SETTLEMENT / "
+             "INITIAL_ROAD phases). 'self' (default) uses the learner end-to-end; "
+             "'heuristic' delegates only the opening to HeuristicAgent and the "
+             "learner takes over from MAIN onwards. Diagnostic for isolating "
+             "opening-quality bottlenecks from in-game play.",
     )
 
     p_bench = sub.add_parser("benchmark", help="run all baseline benchmarks")
@@ -136,6 +147,9 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         print(f"error: --games must be positive (got {args.games})", file=sys.stderr)
         return 2
     learner_agent, learner_label = _load_learner(args.learner)
+    if args.placement_agent == "heuristic":
+        learner_agent = PlacementOverrideAgent(learner_agent, HeuristicAgent())
+        learner_label = f"{learner_label}+heuristic_placement"
     opponent_factory, opponent_label = _resolve_opponent(args.opponent)
     output_dir: Path | None = args.output_dir
     if output_dir is not None:
@@ -292,7 +306,7 @@ def _resolve_opponent(spec: str) -> tuple[_AgentFactory, str]:
 
 def _run_rotated_tournament(
     *,
-    learner: PolicyAgent,
+    learner: Agent,
     opponent_factory: _AgentFactory,
     n_games: int,
     base_seed: int,
