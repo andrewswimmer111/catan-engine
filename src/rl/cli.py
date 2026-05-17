@@ -41,6 +41,8 @@ from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.hybrid_agent import PlacementOverrideAgent
 from rl.agents.policy_agent import PolicyAgent
 from rl.agents.random_agent import RandomAgent
+from rl.agents.search_agent import SearchAgent
+from rl.search.mcts import MCTSConfig
 from rl.env.catan_env import CatanEnv
 from rl.evaluation.benchmarks import (
     bench_heuristic_vs_heuristic,
@@ -97,6 +99,25 @@ def build_parser() -> argparse.ArgumentParser:
              "learner takes over from MAIN onwards. Diagnostic for isolating "
              "opening-quality bottlenecks from in-game play.",
     )
+    p_eval.add_argument(
+        "--use-mcts",
+        action="store_true",
+        help="wrap the learner with PUCT MCTS at inference (no retraining). "
+             "Uses the policy's masked softmax as the prior and the value head "
+             "as the leaf evaluator. Composes with --placement-agent.",
+    )
+    p_eval.add_argument(
+        "--mcts-rollouts",
+        type=int,
+        default=100,
+        help="MCTS rollouts per decision. Default 100. Ignored without --use-mcts.",
+    )
+    p_eval.add_argument(
+        "--mcts-cpuct",
+        type=float,
+        default=2.0,
+        help="PUCT exploration coefficient. Default 2.0. Ignored without --use-mcts.",
+    )
 
     p_bench = sub.add_parser("benchmark", help="run all baseline benchmarks")
     p_bench.add_argument("--games", type=int, default=20)
@@ -147,6 +168,16 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         print(f"error: --games must be positive (got {args.games})", file=sys.stderr)
         return 2
     learner_agent, learner_label = _load_learner(args.learner)
+    if args.use_mcts:
+        cfg = MCTSConfig(
+            rollouts=args.mcts_rollouts,
+            c_puct=args.mcts_cpuct,
+            seed=args.seed,
+        )
+        learner_agent = SearchAgent(learner_agent, cfg)
+        learner_label = (
+            f"{learner_label}+mcts(r={args.mcts_rollouts},c={args.mcts_cpuct:g})"
+        )
     if args.placement_agent == "heuristic":
         learner_agent = PlacementOverrideAgent(learner_agent, HeuristicAgent())
         learner_label = f"{learner_label}+heuristic_placement"
