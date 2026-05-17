@@ -57,6 +57,11 @@ WATCHDOG_ZERO_WINS_ITERS="${WATCHDOG_ZERO_WINS_ITERS:-200}"
 # bump BASELINE_WEIGHT (0.5–0.7) and drop LR (e.g. 1e-4) for refinement.
 INIT_FROM="${INIT_FROM:-}"
 LR="${LR:-}"
+# Final-tournament placement override: set PLACEMENT_AGENT=heuristic to run
+# the post-training vs-random / vs-heuristic evals with the learner only
+# playing from MAIN onwards (HeuristicAgent handles INITIAL_SETTLEMENT /
+# INITIAL_ROAD). Diagnostic — does NOT change the training run itself.
+PLACEMENT_AGENT="${PLACEMENT_AGENT:-self}"
 
 NAME="overnight_$(date +%Y%m%d_%H%M)"
 RUN_DIR="runs/$NAME"
@@ -98,15 +103,17 @@ python scripts/train.py \
     ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     2>&1 | tee "$RUN_DIR/train.log"
 
-echo "[train_overnight] training done — running final tournament vs random"
+echo "[train_overnight] training done — running final tournament vs random (placement_agent=$PLACEMENT_AGENT)"
 python -m rl.cli evaluate \
     --learner "$RUN_DIR/final.pt" --opponent random --games "$FINAL_EVAL_GAMES" \
+    --placement-agent "$PLACEMENT_AGENT" \
     --output-dir "$RUN_DIR/replays_vs_random" \
     2>&1 | tee "$RUN_DIR/eval_vs_random.md"
 
-echo "[train_overnight] running final tournament vs heuristic"
+echo "[train_overnight] running final tournament vs heuristic (placement_agent=$PLACEMENT_AGENT)"
 python -m rl.cli evaluate \
     --learner "$RUN_DIR/final.pt" --opponent heuristic --games "$FINAL_EVAL_GAMES" \
+    --placement-agent "$PLACEMENT_AGENT" \
     --output-dir "$RUN_DIR/replays_vs_heuristic" \
     2>&1 | tee "$RUN_DIR/eval_vs_heuristic.md"
 
