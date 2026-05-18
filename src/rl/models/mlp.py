@@ -35,8 +35,10 @@ class ModelOutput:
     """Masked logits and state value for one forward pass.
 
     ``logits`` has the same shape as the input mask; entries where ``mask``
-    is False are set to :data:`MASK_FILL_VALUE`. ``value`` has shape ``(B,)``
-    after the trailing singleton dim is squeezed.
+    is False are set to :data:`MASK_FILL_VALUE`. ``value`` is ``(B,)`` for
+    a scalar-value model (the default for :class:`MLPPolicyValue`) or
+    ``(B, N_PLAYERS)`` for a per-seat vector-value model (see
+    :class:`rl.models.gnn.GNNPolicyValue` with ``value_kind="vector"``).
     """
 
     logits: torch.Tensor
@@ -45,6 +47,10 @@ class ModelOutput:
 
 class MLPPolicyValue(nn.Module):
     """Shared-trunk policy/value network operating on flat observations."""
+
+    # Static: the flat-encoder MLP is scalar-value-only. The vector value
+    # head is a Phase-3 (AlphaZero) feature on the GNN encoder.
+    value_kind: str = "scalar"
 
     def __init__(
         self,

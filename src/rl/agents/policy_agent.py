@@ -39,6 +39,20 @@ from rl.encoding.protocol import ObservationEncoder
 __all__ = ["PolicyAgent"]
 
 
+def _acting_value(value: torch.Tensor) -> torch.Tensor:
+    """Collapse a model value tensor to a per-row acting-seat scalar.
+
+    Scalar-value models already emit a ``(B,)`` value; vector-value
+    models emit ``(B, N_PLAYERS)`` rotated so slot 0 is the encoder's
+    viewer — which, on training/inference calls, is always the acting
+    seat. Returning slot 0 of the vector keeps callers (:class:`ActStep`
+    consumers, replay archive) shape-stable across model kinds.
+    """
+    if value.dim() == 1:
+        return value
+    return value[..., 0]
+
+
 class PolicyAgent:
     """Trainable policy that doubles as a play-time :class:`Agent`."""
 
@@ -96,11 +110,12 @@ class PolicyAgent:
                 action_t = dist.sample()
             logp_t = dist.log_prob(action_t)
             entropy_t = dist.entropy()
+            value_scalar = _acting_value(out.value)
 
         return ActStep(
             action_idx=int(action_t.item()),
             logp=float(logp_t.item()),
-            value=float(out.value.item()),
+            value=float(value_scalar.item()),
             entropy=float(entropy_t.item()),
         )
 
@@ -158,12 +173,13 @@ class PolicyAgent:
             log_probs = torch.log_softmax(out.logits, dim=-1)
             logp_t = log_probs.gather(-1, action_t.unsqueeze(-1)).squeeze(-1)
             entropy_t = -(probs * log_probs).sum(dim=-1)
+            value_scalar = _acting_value(out.value)
 
         return [
             ActStep(
                 action_idx=int(action_t[i].item()),
                 logp=float(logp_t[i].item()),
-                value=float(out.value[i].item()),
+                value=float(value_scalar[i].item()),
                 entropy=float(entropy_t[i].item()),
             )
             for i in range(obs.shape[0])
@@ -197,13 +213,14 @@ class PolicyAgent:
                 action_t = dist.sample()
             logp_t = dist.log_prob(action_t)
             entropy_t = dist.entropy()
+            value_scalar = _acting_value(out.value)
 
         action_dist = probs.squeeze(0).cpu().numpy()
         return (
             ActStep(
                 action_idx=int(action_t.item()),
                 logp=float(logp_t.item()),
-                value=float(out.value.item()),
+                value=float(value_scalar.item()),
                 entropy=float(entropy_t.item()),
             ),
             action_dist,

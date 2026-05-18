@@ -15,10 +15,13 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 
+from dataclasses import replace as _dc_replace  # noqa: E402
+
 from rl.encoding._action_layout import ACTION_SPACE_SIZE  # noqa: E402
 from rl.encoding.action import ActionEncoder  # noqa: E402
 from rl.encoding.graph_observation import (  # noqa: E402
     GRAPH_OBS_SHAPE,
+    N_PLAYERS,
     GraphObservationEncoder,
 )
 from rl.env.catan_env import CatanEnv  # noqa: E402
@@ -27,11 +30,22 @@ from rl.models.mlp import MASK_FILL_VALUE  # noqa: E402
 
 
 def _make_model(arch: GNNArch | None = None) -> GNNPolicyValue:
+    """Construct a GNNPolicyValue with the project default arch.
+
+    DEFAULT_GNN_ARCH defaults to ``value_kind="vector"`` (AlphaZero-shape
+    head). Tests that need the legacy ``"scalar"`` head pass a custom
+    arch.
+    """
     return GNNPolicyValue(
         obs_dim=GRAPH_OBS_SHAPE[0],
         action_dim=ACTION_SPACE_SIZE,
         arch=arch or DEFAULT_GNN_ARCH,
     )
+
+
+def _scalar_arch(base: GNNArch | None = None) -> GNNArch:
+    """Returns ``base`` (or the default) with ``value_kind="scalar"``."""
+    return _dc_replace(base or DEFAULT_GNN_ARCH, value_kind="scalar")
 
 
 def _encode_states(seeds: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -59,13 +73,26 @@ def _encode_states(seeds: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     return obs, mask
 
 
-def test_forward_shape_and_dtype() -> None:
+def test_forward_shape_and_dtype_vector_default() -> None:
+    """Default arch is ``value_kind="vector"``; value is (B, N_PLAYERS)."""
     model = _make_model()
+    assert model.value_kind == "vector"
+    obs, mask = _encode_states([1, 2, 3])
+    out = model(obs, mask)
+    assert out.logits.shape == (3, ACTION_SPACE_SIZE)
+    assert out.value.shape == (3, N_PLAYERS)
+    assert out.logits.dtype == torch.float32
+    assert out.value.dtype == torch.float32
+
+
+def test_forward_shape_and_dtype_scalar_mode() -> None:
+    """``value_kind="scalar"`` collapses the value head back to (B,)."""
+    model = _make_model(_scalar_arch())
+    assert model.value_kind == "scalar"
     obs, mask = _encode_states([1, 2, 3])
     out = model(obs, mask)
     assert out.logits.shape == (3, ACTION_SPACE_SIZE)
     assert out.value.shape == (3,)
-    assert out.logits.dtype == torch.float32
     assert out.value.dtype == torch.float32
 
 
@@ -140,6 +167,16 @@ def test_constructor_rejects_wrong_action_dim() -> None:
 def test_constructor_rejects_indivisible_node_hidden() -> None:
     bad = GNNArch(node_hidden=130, n_heads=4)  # 130 % 4 != 0
     with pytest.raises(ValueError):
+        GNNPolicyValue(
+            obs_dim=GRAPH_OBS_SHAPE[0], action_dim=ACTION_SPACE_SIZE, arch=bad
+        )
+
+
+def test_constructor_rejects_unknown_value_kind() -> None:
+    """Typos in ``value_kind`` must fail loudly at constructor time,
+    not silently miscompute downstream tensor shapes."""
+    bad = _dc_replace(DEFAULT_GNN_ARCH, value_kind="per-seat")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="value_kind"):
         GNNPolicyValue(
             obs_dim=GRAPH_OBS_SHAPE[0], action_dim=ACTION_SPACE_SIZE, arch=bad
         )

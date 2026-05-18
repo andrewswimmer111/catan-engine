@@ -55,6 +55,9 @@ TINY_GNN = GNNArch(
     n_mp_layers=2,
     n_heads=4,
     global_mlp_hidden=32,
+    # PPO trainer needs scalar value head: its per-step return target is
+    # a single learner-seat scalar, not a per-seat vector.
+    value_kind="scalar",
 )
 
 

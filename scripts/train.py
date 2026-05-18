@@ -60,6 +60,8 @@ from rl.evaluation.scheduler import (
     make_bench_vs_pool,
     make_bench_vs_random,
 )
+from dataclasses import replace as _dc_replace
+
 from rl.models.gnn import DEFAULT_GNN_ARCH, GNNPolicyValue
 from rl.models.mlp import MLPPolicyValue
 from rl.training.checkpoint import (
@@ -99,14 +101,17 @@ def _build_model(
     """Construct the policy/value model matching ``encoder_kind``.
 
     The flat path consumes ``hidden_sizes`` to size the MLP trunk; the
-    graph path uses :data:`DEFAULT_GNN_ARCH`. Adding a CLI knob for the
-    GNN arch later means extending this function and the parser.
+    graph path uses :data:`DEFAULT_GNN_ARCH`. PPO needs a ``scalar``
+    value head — its per-step value target only covers one seat at a
+    time, so we pin ``value_kind="scalar"`` here even though the GNN
+    default for fresh instances is ``"vector"`` (the AZ-friendly shape).
     """
     if encoder_kind == "graph":
+        ppo_arch = _dc_replace(DEFAULT_GNN_ARCH, value_kind="scalar")
         return GNNPolicyValue(
             obs_dim=obs_shape[0],
             action_dim=ACTION_SPACE_SIZE,
-            arch=DEFAULT_GNN_ARCH,
+            arch=ppo_arch,
         )
     return MLPPolicyValue(
         obs_dim=obs_shape[0],

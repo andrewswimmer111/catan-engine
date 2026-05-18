@@ -34,6 +34,20 @@ is the :class:`GraphObservationEncoder` + :class:`GNNPolicyValue` path
 introduced in Phase 1. ``obs_layout_version`` is checked against the
 matching constant for the chosen encoder. Old checkpoints written before
 ``encoder_kind`` existed are treated as ``"flat"`` for back-compat.
+
+Value-head kind
+---------------
+
+``GNNArch.value_kind`` (carried inside ``ModelArch.gnn_arch`` for the
+graph encoder) records whether the value head is ``"scalar"`` (PPO
+back-compat: ``(B,)``) or ``"vector"`` (AlphaZero per-seat: ``(B,
+N_PLAYERS)``). The loader reconstructs the right head shape from this
+field, so a vector-trained model and a scalar-trained model of the same
+GNN dimensions are not interchangeable: loading a scalar state-dict into
+a vector model (or vice versa) raises at ``load_state_dict`` time
+because the value-head linear has a different out-feature count. Old
+graph checkpoints written before this field existed are treated as
+``"scalar"`` for back-compat.
 """
 
 from __future__ import annotations
@@ -324,13 +338,14 @@ def _model_arch_to_dict(arch: ModelArch) -> dict[str, Any]:
     return out
 
 
-def _gnn_arch_to_dict(arch: GNNArch) -> dict[str, int]:
+def _gnn_arch_to_dict(arch: GNNArch) -> dict[str, Any]:
     return {
         "node_hidden": int(arch.node_hidden),
         "player_hidden": int(arch.player_hidden),
         "n_mp_layers": int(arch.n_mp_layers),
         "n_heads": int(arch.n_heads),
         "global_mlp_hidden": int(arch.global_mlp_hidden),
+        "value_kind": str(arch.value_kind),
     }
 
 
@@ -366,12 +381,23 @@ def _model_arch_from_dict(d: dict[str, Any]) -> ModelArch:
 
 
 def _gnn_arch_from_dict(d: dict[str, Any]) -> GNNArch:
+    # Back-compat: checkpoints written before az-001 (Phase 3) didn't
+    # carry ``value_kind``. They were always scalar-value PPO artifacts,
+    # so defaulting missing values to ``"scalar"`` is the lossless choice;
+    # without this default they'd silently load as vector and fail at
+    # state-dict size-mismatch time.
+    value_kind = d.get("value_kind", "scalar")
+    if value_kind not in ("scalar", "vector"):
+        raise IncompatibleCheckpointError(
+            f"unknown value_kind in checkpoint gnn_arch: {value_kind!r}"
+        )
     return GNNArch(
         node_hidden=int(d["node_hidden"]),
         player_hidden=int(d["player_hidden"]),
         n_mp_layers=int(d["n_mp_layers"]),
         n_heads=int(d["n_heads"]),
         global_mlp_hidden=int(d["global_mlp_hidden"]),
+        value_kind=value_kind,
     )
 
 

@@ -45,7 +45,7 @@ Forward pipeline:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 import torch
 import torch.nn as nn
@@ -88,7 +88,22 @@ from rl.models.nets import (
     orthogonal_init,
 )
 
-__all__ = ["GNNArch", "GNNPolicyValue", "DEFAULT_GNN_ARCH"]
+__all__ = ["GNNArch", "GNNPolicyValue", "DEFAULT_GNN_ARCH", "ValueKind"]
+
+
+ValueKind = Literal["scalar", "vector"]
+"""Value-head shape selector.
+
+* ``"scalar"`` — single value per state, shape ``(B,)``. The legacy PPO
+  path (which trains the value head against a per-seat shaped return) only
+  has a meaningful target for one seat at a time, so it expects this
+  shape.
+* ``"vector"`` — full per-seat value vector rotated to viewer-as-slot-0,
+  shape ``(B, N_PLAYERS)``. Slot ``i`` is the predicted win-probability
+  for the seat at turn-order offset ``i`` from the encoder's viewer. This
+  is the AlphaZero-style head; one batched leaf-eval call yields the
+  whole MCTS backup vector without needing N forward passes.
+"""
 
 
 @dataclass(frozen=True)
@@ -116,6 +131,16 @@ class GNNArch:
 
     global_mlp_hidden: int = 512
     """Hidden width of the global / value MLP that sits on the pooled embedding."""
+
+    value_kind: ValueKind = "vector"
+    """Value-head shape: ``"scalar"`` (B,) for PPO, ``"vector"`` (B, N_PLAYERS) for AZ.
+
+    Defaults to ``"vector"``: Phase 3 (AlphaZero) is the supported training
+    path and benefits from a per-seat value head (single forward replaces
+    the four-perspective batched eval in MCTS). PPO callers must pin
+    ``"scalar"`` explicitly because their per-step value target only
+    covers one seat at a time.
+    """
 
 
 DEFAULT_GNN_ARCH: Final[GNNArch] = GNNArch()
@@ -155,6 +180,11 @@ class GNNPolicyValue(nn.Module):
             raise ValueError(
                 f"player_hidden ({arch.player_hidden}) must be divisible by "
                 f"n_heads ({arch.n_heads})"
+            )
+        if arch.value_kind not in ("scalar", "vector"):
+            raise ValueError(
+                f"unknown value_kind: {arch.value_kind!r}; "
+                "expected 'scalar' or 'vector'"
             )
 
         self.obs_dim = obs_dim
@@ -281,9 +311,19 @@ class GNNPolicyValue(nn.Module):
             nn.Linear(arch.global_mlp_hidden, N_GLOBAL_ACTIONS),
             gain=POLICY_HEAD_GAIN,
         )
+        value_out_dim = N_PLAYERS if arch.value_kind == "vector" else 1
         self.value_head = orthogonal_init(
-            nn.Linear(arch.global_mlp_hidden, 1), gain=VALUE_HEAD_GAIN
+            nn.Linear(arch.global_mlp_hidden, value_out_dim), gain=VALUE_HEAD_GAIN
         )
+
+    # ------------------------------------------------------------------
+    # Public attributes
+    # ------------------------------------------------------------------
+
+    @property
+    def value_kind(self) -> ValueKind:
+        """Shape of this model's value head; see :data:`ValueKind`."""
+        return self.arch.value_kind
 
     # ------------------------------------------------------------------
     # Forward
@@ -294,8 +334,11 @@ class GNNPolicyValue(nn.Module):
 
         ``obs`` is ``(B, GRAPH_OBS_SHAPE[0])`` float; ``mask`` is
         ``(B, ACTION_SPACE_SIZE)`` boolean. Returned logits already have
-        illegal entries set to :data:`MASK_FILL_VALUE` and the returned
-        value tensor is shape ``(B,)``.
+        illegal entries set to :data:`MASK_FILL_VALUE`. The returned value
+        tensor has shape ``(B,)`` for ``value_kind="scalar"`` or
+        ``(B, N_PLAYERS)`` for ``value_kind="vector"`` (slot 0 = the
+        encoder's viewer; remaining slots are opponents in turn-order
+        offset from the viewer).
         """
         if obs.dim() != 2 or obs.size(-1) != self.obs_dim:
             raise ValueError(
@@ -363,7 +406,10 @@ class GNNPolicyValue(nn.Module):
         logits.index_copy_(1, self.global_indices, global_logits)
 
         logits = logits.masked_fill(~mask.bool(), MASK_FILL_VALUE)
-        value = self.value_head(global_trunk_out).squeeze(-1)
+        value_raw = self.value_head(global_trunk_out)
+        # Scalar mode collapses the (B, 1) head down to (B,); vector mode
+        # exposes the full (B, N_PLAYERS) per-seat output verbatim.
+        value = value_raw.squeeze(-1) if self.arch.value_kind == "scalar" else value_raw
         return ModelOutput(logits=logits, value=value)
 
     # ------------------------------------------------------------------
