@@ -55,7 +55,8 @@ from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.policy_agent import PolicyAgent
 from rl.agents.random_agent import RandomAgent
 from rl.env.catan_env import CatanEnv
-from rl.evaluation.tournament import Tournament
+from rl.evaluation.az_evaluator import AZEvaluator
+from rl.evaluation.tournament import Tournament  # noqa: F401  re-exported for callers
 from rl.search.mcts import MCTSConfig  # noqa: F401  re-exported via SelfPlayConfig
 from rl.training.az_buffer import AZBatch, AZReplayBuffer
 from rl.training.checkpoint import (
@@ -136,6 +137,8 @@ class AlphaZeroTrainer:
         env_factory: Callable[[int], CatanEnv] | None = None,
         log_dir: str | Path | None = None,
         snapshot_dir: str | Path | None = None,
+        evaluator: AZEvaluator | None = None,
+        logger: TBLogger | NoOpLogger | None = None,
     ) -> None:
         # The model's value head must be the per-seat vector kind — that's
         # the entire AZ contract (one forward at the leaf gives the
@@ -170,7 +173,17 @@ class AlphaZeroTrainer:
         self._iteration = 0
         self._global_step = 0  # one per gradient step
         self._n_self_play_transitions = 0
-        self._logger: TBLogger | NoOpLogger = make_logger(log_dir)
+        # ``logger`` takes precedence over ``log_dir`` so a caller that
+        # wants to share one SummaryWriter across the trainer + evaluator
+        # can pass a pre-built logger; otherwise we build one off log_dir
+        # (or NoOpLogger when log_dir is None).
+        if logger is not None and log_dir is not None:
+            raise ValueError(
+                "Pass either ``logger`` or ``log_dir`` to AlphaZeroTrainer, not both."
+            )
+        self._logger: TBLogger | NoOpLogger = (
+            logger if logger is not None else make_logger(log_dir)
+        )
 
         self._snapshot_dir: Path | None = (
             Path(snapshot_dir) if snapshot_dir else None
@@ -182,6 +195,10 @@ class AlphaZeroTrainer:
         self._env_factory: Callable[[int], CatanEnv] = (
             env_factory if env_factory is not None else self._default_env_factory
         )
+        # Optional eval driver. ``None`` falls back to the lite anchor
+        # eval below (vs random + vs heuristic only, no Elo / promotion).
+        # az-007's CLI wires up a full :class:`AZEvaluator` by default.
+        self._evaluator: AZEvaluator | None = evaluator
 
         self._model_arch = model_arch_from(learner.model)
         self._obs_layout_version = obs_layout_version_for(
@@ -205,8 +222,20 @@ class AlphaZeroTrainer:
         return len(self._buffer)
 
     @property
+    def learner(self) -> PolicyAgent:
+        return self._learner
+
+    @property
     def logger(self) -> TBLogger | NoOpLogger:
         return self._logger
+
+    @property
+    def env_factory(self) -> Callable[[int], CatanEnv]:
+        return self._env_factory
+
+    @property
+    def evaluator(self) -> AZEvaluator | None:
+        return self._evaluator
 
     def train(self, total_iters: int) -> None:
         """Run ``total_iters`` AlphaZero iterations end-to-end."""
@@ -359,14 +388,26 @@ class AlphaZeroTrainer:
     # ------------------------------------------------------------------
 
     def _maybe_eval(self) -> dict[str, float]:
-        """Run cadenced anchor-evals; return a flat scalar dict (possibly empty)."""
+        """Run cadenced anchor-evals; return a flat scalar dict (possibly empty).
+
+        When an :class:`AZEvaluator` was supplied at construction, that
+        evaluator owns the eval logic (anchors + prior-snapshot +
+        Elo). Without one, we fall back to a lite vs-random / vs-heuristic
+        anchor eval on the trainer-level cadence — sufficient for the
+        smoke tests in :mod:`tests.rl.test_alphazero_trainer`.
+        """
         next_iter = self._iteration + 1  # post-increment view
+
+        if self._evaluator is not None:
+            self._learner.model.eval()
+            result = self._evaluator.maybe_run(self._learner, next_iter)
+            return result or {}
+
         if self._cfg.eval_every_iters <= 0:
             return {}
         if next_iter % self._cfg.eval_every_iters != 0:
             return {}
         self._learner.model.eval()
-
         anchor_results = {
             "vs_random": self._eval_against(
                 lambda rng: RandomAgent(rng, skip_proposals=True),
@@ -409,17 +450,31 @@ class AlphaZeroTrainer:
     # ------------------------------------------------------------------
 
     def _maybe_snapshot(self) -> None:
-        """Periodic snapshot to ``snapshot_dir``."""
-        if self._snapshot_dir is None:
-            return
+        """Periodic snapshot to ``snapshot_dir``; refresh prior-snapshot.
+
+        When an :class:`AZEvaluator` is attached, every snapshot also
+        offers the current learner as the new prior-snapshot opponent.
+        The evaluator's promotion gate decides whether to accept it.
+        """
         if self._cfg.snapshot_every_iters <= 0:
             return
         next_iter = self._iteration + 1
         if next_iter % self._cfg.snapshot_every_iters != 0:
             return
-        path = self._snapshot_dir / f"iter_{next_iter}.pt"
-        self.save_checkpoint(path)
-        self._last_snapshot_path = path
+
+        if self._snapshot_dir is not None:
+            path = self._snapshot_dir / f"iter_{next_iter}.pt"
+            self.save_checkpoint(path)
+            self._last_snapshot_path = path
+
+        if self._evaluator is not None:
+            promoted = self._evaluator.refresh_prior_snapshot(
+                self._learner, next_iter
+            )
+            if promoted:
+                self._logger.log_scalar(
+                    "eval/promotion_event", 1.0, self._global_step
+                )
 
     # ------------------------------------------------------------------
     # Helpers

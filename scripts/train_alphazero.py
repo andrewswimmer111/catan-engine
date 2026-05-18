@@ -43,12 +43,15 @@ from rl.encoding.graph_observation import (
     GraphObservationEncoder,
 )
 from rl.env.catan_env import CatanEnv
+from rl.evaluation.az_evaluator import AZEvalConfig, AZEvaluator
+from rl.evaluation.elo import EloTracker
 from rl.models.gnn import DEFAULT_GNN_ARCH, GNNPolicyValue
 from rl.search.mcts import MCTSConfig
 from rl.training.alphazero import AlphaZeroTrainer, AZTrainConfig
 from rl.training.checkpoint import load_checkpoint
 from rl.training.self_play import SelfPlayConfig
 from rl.utils.device import resolve_device
+from rl.utils.logging import make_logger
 
 
 _PLAYER_IDS: tuple[PlayerID, ...] = tuple(PlayerID(i) for i in range(1, 5))
@@ -184,6 +187,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=AZTrainConfig.__dataclass_fields__["snapshot_every_iters"].default,
         help="iterations between checkpoint snapshots",
+    )
+    p.add_argument(
+        "--no-eval-random",
+        action="store_true",
+        help="skip the vs-random anchor benchmark",
+    )
+    p.add_argument(
+        "--no-eval-heuristic",
+        action="store_true",
+        help="skip the vs-heuristic anchor benchmark",
+    )
+    p.add_argument(
+        "--no-eval-prior-snapshot",
+        action="store_true",
+        help="skip the vs-prior-snapshot benchmark",
+    )
+    p.add_argument(
+        "--promote-threshold",
+        type=float,
+        default=None,
+        help="optional promotion gate: only refresh the prior-snapshot "
+             "opponent when learner_win_rate > THIS value. Default None "
+             "(continuous training; refresh on every snapshot).",
     )
 
     # I/O.
@@ -393,12 +419,34 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    # Build the AZ evaluator once so the trainer's logger is shared with
+    # the evaluator's TB scalars (single SummaryWriter, single TB log dir).
+    logger = make_logger(log_dir)
+    env_factory = _env_factory_for(learner)
+    eval_cfg = AZEvalConfig(
+        every_iters=cfg.eval_every_iters,
+        n_games=cfg.eval_games,
+        bench_random=not args.no_eval_random,
+        bench_heuristic=not args.no_eval_heuristic,
+        bench_prior_snapshot=not args.no_eval_prior_snapshot,
+        promotion_threshold=args.promote_threshold,
+        player_ids=cfg.player_ids,
+    )
+    evaluator = AZEvaluator(
+        config=eval_cfg,
+        env_factory=env_factory,
+        logger=logger,
+        elo=EloTracker(),
+        ratings_path=output_dir / "elo.json",
+    )
+
     trainer = AlphaZeroTrainer(
         learner=learner,
         config=cfg,
-        env_factory=_env_factory_for(learner),
-        log_dir=log_dir,
+        env_factory=env_factory,
         snapshot_dir=snapshot_dir,
+        evaluator=evaluator,
+        logger=logger,
     )
 
     t0 = time.time()
