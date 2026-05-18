@@ -27,6 +27,13 @@ This project implements an object oriented Catan simulation engine, an RL agent 
 
 ### Running the Program
 
+### Remote training
+
+To offload training to a VM and pull artefacts back hourly via rsync,
+see [`docs/remote_training.md`](docs/remote_training.md). The
+[`scripts/vm/`](scripts/vm/) helpers wrap the SSH + tmux + rsync +
+cron plumbing.
+
 ### Notes/Assumptions
 
 ### Project Impressions
