@@ -14,6 +14,12 @@ Outputs (under ``--output-dir``, default ``runs/<timestamp>``):
 * ``snapshots/`` — periodic ``iter_N.pt`` checkpoints.
 * ``config.json`` — pinned snapshot of the CLI flags + resolved
   hyperparameters.
+* ``progress.md`` — human-readable run progress: status (running /
+  done / interrupted), ETA, per-iteration table of losses + eval
+  win-rates. Rewritten after every iteration. ``cat progress.md`` (or
+  ``watch -n 30 cat progress.md``) is the canonical way to follow a
+  long run without spinning up TensorBoard.
+* ``elo.json`` — Elo trajectory across iterations.
 * ``final.pt`` — final checkpoint written on clean exit.
 
 Usage::
@@ -457,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_dir=snapshot_dir,
         evaluator=evaluator,
         logger=logger,
+        progress_path=output_dir / "progress.md",
     )
 
     t0 = time.time()

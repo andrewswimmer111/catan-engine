@@ -286,6 +286,152 @@ def test_train_iteration_runs_eval_on_cadence(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# Progress file
+# ----------------------------------------------------------------------
+
+
+def test_progress_path_unset_means_no_file_written(tmp_path: Path) -> None:
+    """A trainer without ``progress_path`` should not create any file in
+    its working directory — regression guard against silent writes."""
+    learner = _make_vector_policy(seed=41)
+    trainer = AlphaZeroTrainer(learner, _tiny_az_config())
+    # Synthetic history; no train_iteration call needed.
+    trainer._history.append({"iter": 1.0, "wall_seconds": 1.5})  # noqa: SLF001
+    trainer._write_progress(status="running")  # noqa: SLF001
+    # No file was supposed to be written; tmp_path stays empty.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_progress_md_header_carries_run_config_and_status(tmp_path: Path) -> None:
+    """The header section names the run's MCTS rollouts + stalemate value
+    + status so the user can sanity-check the run config at a glance."""
+    learner = _make_vector_policy(seed=43)
+    cfg = _tiny_az_config()
+    progress = tmp_path / "progress.md"
+    trainer = AlphaZeroTrainer(learner, cfg, progress_path=progress)
+    trainer._train_total_iters = 10  # noqa: SLF001 — simulate train() prologue
+    import time as _time
+    trainer._train_start_time = _time.time() - 30.0  # noqa: SLF001 — 30s ago
+    trainer._history.append(  # noqa: SLF001
+        {
+            "iter": 1.0,
+            "wall_seconds": 30.0,
+            "self_play/stalemate_rate": 0.5,
+            "self_play/mean_moves_per_game": 80.0,
+            "train/policy_loss": 1.23,
+            "train/value_loss": 0.05,
+            "buffer/size": 200.0,
+        }
+    )
+    trainer._write_progress(status="running")  # noqa: SLF001
+
+    text = progress.read_text()
+    assert "# AlphaZero run progress" in text
+    assert "**Status**: running" in text
+    assert "**Iteration**: 1 / 10" in text
+    # Config section names the knobs we'd want to check at a glance.
+    assert f"mcts rollouts / move: {cfg.self_play.mcts.rollouts}" in text
+    assert f"stalemate value: {cfg.self_play.stalemate_value}" in text
+    # The table has the row for iter 1.
+    assert "| 1 |" in text
+
+
+def test_progress_md_table_renders_eval_dash_when_no_eval_fired(
+    tmp_path: Path,
+) -> None:
+    """Iterations that don't carry eval/* keys must render ``-`` in
+    the win-rate columns, not ``0%`` — those two are very different
+    signals when reading the table during a run."""
+    learner = _make_vector_policy(seed=45)
+    progress = tmp_path / "progress.md"
+    trainer = AlphaZeroTrainer(
+        learner, _tiny_az_config(), progress_path=progress
+    )
+    trainer._history.append(  # noqa: SLF001 — no eval/* keys
+        {
+            "iter": 1.0,
+            "wall_seconds": 5.0,
+            "self_play/stalemate_rate": 0.0,
+            "self_play/mean_moves_per_game": 60.0,
+            "train/policy_loss": 1.5,
+            "train/value_loss": 0.1,
+            "buffer/size": 80.0,
+        }
+    )
+    trainer._write_progress(status="running")  # noqa: SLF001
+    rows = [
+        ln for ln in progress.read_text().splitlines() if ln.startswith("| 1 |")
+    ]
+    assert rows, "expected an iter-1 row in the table"
+    # Three eval columns; each should be the literal `-` placeholder.
+    assert rows[0].count(" - ") >= 3
+
+
+def test_progress_md_status_done_after_train_completes(tmp_path: Path) -> None:
+    """After ``train(total_iters)`` finishes, the file's status must
+    flip to ``done`` (the file is rewritten in the ``finally`` block)."""
+    learner = _make_vector_policy(seed=47)
+    progress = tmp_path / "progress.md"
+    trainer = AlphaZeroTrainer(
+        learner,
+        _tiny_az_config(games_per_iter=1, batches_per_iter=1),
+        env_factory=_graph_env_factory,
+        progress_path=progress,
+    )
+    # Skip a real iteration: stub out train_iteration so the test stays
+    # fast (no actual self-play). The status logic is what matters here.
+    trainer.train_iteration = lambda: {  # type: ignore[method-assign]
+        "iter": 1.0,
+        "wall_seconds": 0.01,
+    }
+    trainer.train(total_iters=1)
+    assert "**Status**: done" in progress.read_text()
+
+
+def test_progress_md_status_interrupted_on_exception(tmp_path: Path) -> None:
+    """An exception mid-train should still flush progress.md with
+    ``interrupted`` status (the ``finally`` block fires)."""
+    learner = _make_vector_policy(seed=49)
+    progress = tmp_path / "progress.md"
+    trainer = AlphaZeroTrainer(
+        learner,
+        _tiny_az_config(),
+        env_factory=_graph_env_factory,
+        progress_path=progress,
+    )
+
+    def _bomb():
+        raise RuntimeError("simulated mid-train failure")
+
+    trainer.train_iteration = _bomb  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="simulated"):
+        trainer.train(total_iters=3)
+    assert "**Status**: interrupted" in progress.read_text()
+
+
+@pytest.mark.slow
+def test_progress_md_written_after_real_train_iteration(tmp_path: Path) -> None:
+    """End-to-end: one real train_iteration → progress.md exists with a
+    table row populated from the live summary."""
+    learner = _make_vector_policy(seed=51)
+    progress = tmp_path / "progress.md"
+    trainer = AlphaZeroTrainer(
+        learner,
+        _tiny_az_config(games_per_iter=1, batches_per_iter=2),
+        env_factory=_graph_env_factory,
+        progress_path=progress,
+    )
+    trainer._train_total_iters = 1  # noqa: SLF001 — short-circuit a 1-iter run
+    import time as _time
+    trainer._train_start_time = _time.time()  # noqa: SLF001
+    trainer.train_iteration()
+    text = progress.read_text()
+    assert "**Status**: running" in text
+    # The table has a row for iter 1.
+    assert "\n| 1 |" in text
+
+
 @pytest.mark.nightly
 def test_multi_iter_loop_keeps_losses_finite(tmp_path: Path) -> None:
     """Run several AZ iterations on a tiny config; loss never NaN/Inf

@@ -146,6 +146,7 @@ class AlphaZeroTrainer:
         snapshot_dir: str | Path | None = None,
         evaluator: AZEvaluator | None = None,
         logger: TBLogger | NoOpLogger | None = None,
+        progress_path: str | Path | None = None,
     ) -> None:
         # The model's value head must be the per-seat vector kind — that's
         # the entire AZ contract (one forward at the leaf gives the
@@ -207,6 +208,17 @@ class AlphaZeroTrainer:
         # az-007's CLI wires up a full :class:`AZEvaluator` by default.
         self._evaluator: AZEvaluator | None = evaluator
 
+        # Human-readable progress file. Rewritten in full after every
+        # iteration (small file; atomic-rewrite is simpler than appending
+        # and getting partial-write corner cases right). ``train_alphazero.py``
+        # wires this to ``<output_dir>/progress.md`` by default.
+        self._progress_path: Path | None = (
+            Path(progress_path) if progress_path else None
+        )
+        self._history: list[dict[str, float]] = []
+        self._train_start_time: float | None = None
+        self._train_total_iters: int | None = None
+
         self._model_arch = model_arch_from(learner.model)
         self._obs_layout_version = obs_layout_version_for(
             self._model_arch.encoder_kind
@@ -248,11 +260,16 @@ class AlphaZeroTrainer:
         """Run ``total_iters`` AlphaZero iterations end-to-end."""
         if total_iters <= 0:
             raise ValueError(f"total_iters must be positive (got {total_iters})")
+        self._train_total_iters = total_iters
+        self._train_start_time = time.time()
+        completed = False
         try:
             for _ in range(total_iters):
                 self.train_iteration()
+            completed = True
         finally:
             self._logger.flush()
+            self._write_progress(status="done" if completed else "interrupted")
 
     def train_iteration(self) -> dict[str, float]:
         """One AZ iteration: self-play → update → cadenced eval/snapshot.
@@ -277,6 +294,8 @@ class AlphaZeroTrainer:
             "buffer/size": float(len(self._buffer)),
         }
         self._log_iteration(summary)
+        self._history.append(summary)
+        self._write_progress(status="running")
         return summary
 
     def save_checkpoint(self, path: str | Path) -> None:
@@ -531,6 +550,91 @@ class AlphaZeroTrainer:
         """
         return CatanEnv(seed=seed, obs_encoder=self._learner.obs_encoder)
 
+    # ------------------------------------------------------------------
+    # Progress file
+    # ------------------------------------------------------------------
+
+    def _write_progress(self, *, status: str) -> None:
+        """Atomically rewrite ``progress.md`` with the latest run state."""
+        if self._progress_path is None:
+            return
+        content = self._render_progress_md(status=status)
+        self._progress_path.parent.mkdir(parents=True, exist_ok=True)
+        self._progress_path.write_text(content)
+
+    def _render_progress_md(self, *, status: str) -> str:
+        """Build the human-readable run-progress markdown.
+
+        The layout is: header (status + ETA + config) followed by a
+        one-row-per-iteration table. Designed for ``cat progress.md`` /
+        ``watch -n 30 cat progress.md`` during a long run.
+        """
+        iter_done = len(self._history)
+        total = self._train_total_iters or 0
+        elapsed = (
+            time.time() - self._train_start_time
+            if self._train_start_time is not None
+            else 0.0
+        )
+
+        lines: list[str] = ["# AlphaZero run progress", ""]
+        lines.append(f"- **Status**: {status}")
+        lines.append(
+            f"- **Iteration**: {iter_done} / {total}"
+            if total
+            else f"- **Iteration**: {iter_done}"
+        )
+        lines.append(f"- **Global step**: {self._global_step}")
+        lines.append(f"- **Elapsed**: {_fmt_duration(elapsed)}")
+        if iter_done > 0 and status == "running" and total > iter_done:
+            mean_iter = elapsed / iter_done
+            eta = mean_iter * (total - iter_done)
+            lines.append(f"- **Mean per-iter**: {_fmt_duration(mean_iter)}")
+            lines.append(f"- **ETA**: {_fmt_duration(eta)}")
+        lines.append(f"- **Buffer size**: {len(self._buffer)} / {self._cfg.buffer_capacity}")
+        if self._evaluator is not None and self._evaluator.prior_snapshot_iter is not None:
+            lines.append(
+                f"- **Prior snapshot**: iter {self._evaluator.prior_snapshot_iter}"
+            )
+
+        lines += ["", "## Config", ""]
+        sp = self._cfg.self_play
+        mcts = sp.mcts
+        lines += [
+            f"- device: `{self._device}`",
+            f"- self-play workers: {self._cfg.n_self_play_workers}",
+            f"- games / iter: {self._cfg.games_per_iter}",
+            f"- batches / iter: {self._cfg.batches_per_iter}",
+            f"- batch size: {self._cfg.batch_size}",
+            f"- buffer capacity: {self._cfg.buffer_capacity}",
+            f"- mcts rollouts / move: {mcts.rollouts}",
+            f"- mcts c_puct: {mcts.c_puct}",
+            f"- dirichlet (α, ε): ({mcts.dirichlet_alpha}, {mcts.dirichlet_epsilon})",
+            f"- temperature schedule: T={sp.temperature_initial} for first "
+            f"{sp.temperature_threshold_moves} moves, then T={sp.temperature_final}",
+            f"- stalemate value: {sp.stalemate_value}",
+            f"- max moves: {sp.max_moves}",
+            f"- lr: {self._cfg.lr}",
+            f"- weight decay (L2): {self._cfg.weight_decay}",
+            f"- value coef: {self._cfg.value_coef}",
+            f"- eval / snapshot cadence (iters): "
+            f"{self._cfg.eval_every_iters} / {self._cfg.snapshot_every_iters}",
+        ]
+
+        lines += ["", "## Iterations", ""]
+        cols = [
+            "iter", "wall", "stale%", "moves/game",
+            "pol_loss", "val_loss",
+            "vs_rand", "vs_heur", "vs_prior",
+            "buffer",
+        ]
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("| " + " | ".join(["---"] * len(cols)) + " |")
+        for h in self._history:
+            lines.append(_render_iter_row(h))
+        lines.append("")
+        return "\n".join(lines)
+
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -544,3 +648,49 @@ def _zero_update_metrics() -> dict[str, float]:
         "total_loss": 0.0,
         "grad_norm": 0.0,
     }
+
+
+# ----------------------------------------------------------------------
+# Progress rendering helpers
+# ----------------------------------------------------------------------
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Compact ``Xh Ym Zs`` formatter, dropping the largest zero unit.
+
+    Three tiers so the field stays narrow in the progress table:
+    sub-minute → ``12.3s``, sub-hour → ``5m 12s``, otherwise ``1h 23m``.
+    """
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
+
+def _fmt_pct(value: float | None) -> str:
+    """Percent with no decimals, or ``-`` when the eval didn't fire."""
+    if value is None:
+        return "-"
+    return f"{value * 100:.0f}%"
+
+
+def _render_iter_row(summary: dict[str, float]) -> str:
+    """One markdown table row from a per-iteration summary dict."""
+    def _get(key: str) -> float | None:
+        v = summary.get(key)
+        return None if v is None else float(v)
+
+    cells = [
+        f"{int(summary.get('iter', 0))}",
+        _fmt_duration(float(summary.get("wall_seconds", 0.0))),
+        f"{float(summary.get('self_play/stalemate_rate', 0.0)) * 100:.0f}",
+        f"{float(summary.get('self_play/mean_moves_per_game', 0.0)):.0f}",
+        f"{float(summary.get('train/policy_loss', 0.0)):.3f}",
+        f"{float(summary.get('train/value_loss', 0.0)):.3f}",
+        _fmt_pct(_get("eval/vs_random/win_rate")),
+        _fmt_pct(_get("eval/vs_heuristic/win_rate")),
+        _fmt_pct(_get("eval/vs_prior_snapshot/win_rate")),
+        f"{int(summary.get('buffer/size', 0))}",
+    ]
+    return "| " + " | ".join(cells) + " |"
