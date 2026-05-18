@@ -41,11 +41,36 @@ else
 fi
 
 cd "$REPO"
+
+# Detect a partially-created venv: directory exists but pip is missing.
+# This happens on Debian/Ubuntu hosts that have ``python3`` but not
+# ``python3-venv`` installed — ``python3 -m venv`` creates the layout
+# without ensurepip. Wipe and re-create rather than try to patch a
+# half-built env.
+if [[ -d venv && ! -x venv/bin/pip ]]; then
+    echo "[setup] existing venv is broken (no venv/bin/pip); rebuilding"
+    rm -rf venv
+fi
+
 if [[ ! -d venv ]]; then
     echo "[setup] creating venv at $REPO/venv"
     python3 -m venv venv
 else
     echo "[setup] venv already exists; skipping create"
+fi
+
+# Fail loudly with a fix-it pointer if ensurepip still didn't run.
+# Continuing past this would just blow up on ./venv/bin/pip a line later
+# with a less obvious error.
+if [[ ! -x venv/bin/pip ]]; then
+    cat <<'EOF' >&2
+[setup] ERROR: python3 -m venv produced a venv without pip.
+       This usually means the python3-venv package isn't installed.
+       On Debian / Ubuntu:
+           sudo apt update && sudo apt install -y python3-venv python3-pip
+       Then re-run scripts/vm/setup_vm.sh.
+EOF
+    exit 1
 fi
 
 # Always sync deps so re-running after pyproject changes keeps the VM
