@@ -19,6 +19,7 @@ evaluation across rollouts) to re-project Phase 2 eval wall-time.
 
 from __future__ import annotations
 
+import argparse
 import copy
 import sys
 import time
@@ -78,14 +79,33 @@ def _advance_to_clean_mid_state(engine: GameEngine, state, action_encoder, rng_s
     raise RuntimeError("could not find a clean MAIN-phase mid-state in 500 steps")
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=Path("runs/overnight_20260515_2006/final.pt"),
+        help="checkpoint to measure against (default: run #5).",
+    )
+    p.add_argument(
+        "--device",
+        choices=("cpu", "mps", "cuda"),
+        default="cpu",
+        help="torch device for the loaded model. Use 'mps' to re-project "
+             "Phase-3 wall-times under Metal.",
+    )
+    return p
+
+
 def main() -> None:
-    ckpt_path = Path("runs/overnight_20260515_2006/final.pt")
+    args = _build_parser().parse_args()
+    ckpt_path: Path = args.checkpoint
     if not ckpt_path.is_file():
         print(f"error: checkpoint not found at {ckpt_path}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[measure] loading {ckpt_path}", flush=True)
-    agent, meta = load_checkpoint(ckpt_path)
+    print(f"[measure] loading {ckpt_path} (device={args.device})", flush=True)
+    agent, meta = load_checkpoint(ckpt_path, device=args.device)
     print(
         f"[measure] encoder={meta.model_arch.encoder_kind} "
         f"train_step={meta.train_step}",
@@ -144,9 +164,10 @@ def main() -> None:
         [obs_encoder.encode(make_player_view(mid_state, p)) for p in pids]
     )
     mask_batch = np.tile(mask, (4, 1))
+    device = agent.device
     fwd4_us = _time_calls(
         "batched 4-way forward",
-        lambda: _run_batched_forward(agent.model, obs_batch, mask_batch),
+        lambda: _run_batched_forward(agent.model, obs_batch, mask_batch, device=device),
         n=200,
     )
 
@@ -186,9 +207,11 @@ def main() -> None:
     print(f"  total projected eval wall-time:  {total / 3600:.2f} h")
 
 
-def _run_batched_forward(model, obs: np.ndarray, mask: np.ndarray) -> None:
-    obs_t = torch.as_tensor(obs, dtype=torch.float32)
-    mask_t = torch.as_tensor(mask, dtype=torch.bool)
+def _run_batched_forward(
+    model, obs: np.ndarray, mask: np.ndarray, *, device: torch.device
+) -> None:
+    obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device)
+    mask_t = torch.as_tensor(mask, dtype=torch.bool, device=device)
     with torch.no_grad():
         model(obs_t, mask_t)
 

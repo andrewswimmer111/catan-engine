@@ -236,6 +236,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="parallel rollout subprocesses. >1 enables SubprocVecEnv path.",
     )
     p.add_argument(
+        "--device",
+        choices=("cpu", "mps", "cuda"),
+        default="cpu",
+        help="torch device for the learner model. 'mps' uses Apple Metal "
+             "(macOS only); 'cuda' uses a CUDA GPU. Vec rollout workers "
+             "still construct CPU model copies for sub-process inference, "
+             "so the speedup primarily applies to the main-process PPO "
+             "update and eval forward passes.",
+    )
+    p.add_argument(
         "--vec-opponents",
         choices=("random", "heuristic"),
         default="random",
@@ -360,6 +370,29 @@ def _build_config(args: argparse.Namespace) -> TrainConfig:
         seed=args.seed,
         num_envs=args.num_envs,
     )
+
+
+def _resolve_device(spec: str) -> torch.device:
+    """Validate ``--device`` against the actually-available backends.
+
+    Fails fast if the user asked for a device the host can't provide,
+    rather than silently falling back to CPU (which would surprise the
+    user and silently halve the run's throughput target).
+    """
+    if spec == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit(
+                "error: --device cuda but torch.cuda.is_available()=False"
+            )
+        return torch.device("cuda")
+    if spec == "mps":
+        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
+            raise SystemExit(
+                "error: --device mps but torch MPS backend is unavailable "
+                "(macOS + Metal-supporting GPU required)"
+            )
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def _resolve_warm_start(
@@ -531,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["CATAN_RL_ENCODER"] = args.encoder
 
     torch.manual_seed(cfg.seed)
+    device = _resolve_device(args.device)
     encoder_kind: EncoderKind = args.encoder
     obs_encoder = _make_obs_encoder(encoder_kind)
     model = _build_model(encoder_kind, cfg.hidden_sizes, obs_encoder.out_shape)
@@ -538,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
         model,
         ActionEncoder(_PLAYER_IDS),
         obs_encoder=obs_encoder,
+        device=device,
     )
     if init_agent is not None:
         # Warm-start: only the model weights carry over. The Trainer below

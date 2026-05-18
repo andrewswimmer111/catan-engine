@@ -118,6 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="PUCT exploration coefficient. Default 2.0. Ignored without --use-mcts.",
     )
+    p_eval.add_argument(
+        "--device",
+        choices=("cpu", "mps", "cuda"),
+        default="cpu",
+        help="torch device for the learner (and any checkpoint opponent). "
+             "Defaults to CPU; 'mps' enables Metal on macOS, 'cuda' on a "
+             "CUDA GPU host.",
+    )
 
     p_bench = sub.add_parser("benchmark", help="run all baseline benchmarks")
     p_bench.add_argument("--games", type=int, default=20)
@@ -167,7 +175,8 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     if args.games <= 0:
         print(f"error: --games must be positive (got {args.games})", file=sys.stderr)
         return 2
-    learner_agent, learner_label = _load_learner(args.learner)
+    device = _resolve_eval_device(args.device)
+    learner_agent, learner_label = _load_learner(args.learner, device=device)
     if args.use_mcts:
         cfg = MCTSConfig(
             rollouts=args.mcts_rollouts,
@@ -181,7 +190,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     if args.placement_agent == "heuristic":
         learner_agent = PlacementOverrideAgent(learner_agent, HeuristicAgent())
         learner_label = f"{learner_label}+heuristic_placement"
-    opponent_factory, opponent_label = _resolve_opponent(args.opponent)
+    opponent_factory, opponent_label = _resolve_opponent(args.opponent, device=device)
     output_dir: Path | None = args.output_dir
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -302,18 +311,40 @@ def _env_factory(seed: int) -> CatanEnv:
     return CatanEnv(seed=seed)
 
 
-def _load_learner(path: Path) -> tuple[PolicyAgent, str]:
-    agent, _ = load_checkpoint(path)
+def _resolve_eval_device(spec: str):
+    """Mirror of :func:`scripts.train._resolve_device` for the eval CLI."""
+    import torch
+
+    if spec == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit(
+                "error: --device cuda but torch.cuda.is_available()=False"
+            )
+        return torch.device("cuda")
+    if spec == "mps":
+        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
+            raise SystemExit(
+                "error: --device mps but torch MPS backend is unavailable "
+                "(macOS + Metal-supporting GPU required)"
+            )
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _load_learner(path: Path, *, device=None) -> tuple[PolicyAgent, str]:
+    agent, _ = load_checkpoint(path, device=device or "cpu")
     return agent, f"checkpoint[{path.name}]"
 
 
-def _resolve_opponent(spec: str) -> tuple[_AgentFactory, str]:
+def _resolve_opponent(spec: str, *, device=None) -> tuple[_AgentFactory, str]:
     """Turn an opponent spec into ``(factory, human_label)``.
 
     ``factory`` is called once per opponent seat per rotation with a fresh
     ``random.Random``. For checkpoint opponents the factory ignores its rng
     arg and returns a shared ``PolicyAgent`` instance — sharing weights is
-    fine because :meth:`PolicyAgent.choose` is stateless.
+    fine because :meth:`PolicyAgent.choose` is stateless. ``device``
+    propagates to checkpoint opponents so all networks live on the same
+    backend as the learner.
     """
     if spec == "random":
         return lambda rng: RandomAgent(rng, skip_proposals=True), "random"
@@ -325,7 +356,7 @@ def _resolve_opponent(spec: str) -> tuple[_AgentFactory, str]:
         raise FileNotFoundError(
             f"opponent spec {spec!r} is neither 'random'/'heuristic' nor an existing path"
         )
-    agent, _ = load_checkpoint(path)
+    agent, _ = load_checkpoint(path, device=device or "cpu")
     # Opponent inference is stochastic — greedy opponents are easy to game.
     agent.stochastic_play = True
 

@@ -231,13 +231,23 @@ def save_checkpoint(agent: PolicyAgent, path: Path, meta: CheckpointMeta) -> Non
     torch.save(payload, str(out_path))
 
 
-def load_checkpoint(path: Path) -> tuple[PolicyAgent, CheckpointMeta]:
+def load_checkpoint(
+    path: Path,
+    *,
+    device: str | torch.device = "cpu",
+) -> tuple[PolicyAgent, CheckpointMeta]:
     """Load a checkpoint, validate compatibility, and return ``(agent, meta)``.
 
     The encoder kind recorded in ``meta.model_arch`` selects both the
     obs-layout version to check and the (model, obs_encoder) pair to
     instantiate. Old checkpoints written before ``encoder_kind`` existed
     are treated as ``"flat"`` so existing artifacts keep loading.
+
+    ``device`` selects where the constructed model lives. We always
+    deserialize the raw tensors with ``map_location="cpu"`` and then
+    move the assembled :class:`PolicyAgent` onto the requested device —
+    this avoids deserialization-time issues on non-CPU backends and lets
+    a single checkpoint round-trip cleanly to any device.
 
     Raises :class:`IncompatibleCheckpointError` if either layout version on
     disk differs from the current codebase. Raises ``FileNotFoundError`` if
@@ -252,7 +262,7 @@ def load_checkpoint(path: Path) -> tuple[PolicyAgent, CheckpointMeta]:
     meta = _meta_from_dict(payload["meta"])
     _validate_layout_versions(meta)
 
-    agent = _build_agent_for_arch(meta.model_arch)
+    agent = _build_agent_for_arch(meta.model_arch, device=device)
     agent.load_state_dict(payload["model"])
     return agent, meta
 
@@ -285,7 +295,11 @@ def _validate_layout_versions(meta: CheckpointMeta) -> None:
         )
 
 
-def _build_agent_for_arch(arch: ModelArch) -> PolicyAgent:
+def _build_agent_for_arch(
+    arch: ModelArch,
+    *,
+    device: str | torch.device = "cpu",
+) -> PolicyAgent:
     if arch.encoder_kind == "flat":
         model: torch.nn.Module = MLPPolicyValue(
             obs_dim=arch.obs_dim,
@@ -293,7 +307,7 @@ def _build_agent_for_arch(arch: ModelArch) -> PolicyAgent:
             hidden=arch.hidden,
         )
         encoder = ActionEncoder(list(_DEFAULT_PLAYER_IDS))
-        return PolicyAgent(model, encoder)  # type: ignore[arg-type]
+        return PolicyAgent(model, encoder, device=device)  # type: ignore[arg-type]
     if arch.encoder_kind == "graph":
         assert arch.gnn_arch is not None  # validated by ModelArch.__post_init__
         if arch.obs_dim != GRAPH_OBS_SHAPE[0]:
@@ -311,6 +325,7 @@ def _build_agent_for_arch(arch: ModelArch) -> PolicyAgent:
             model,  # type: ignore[arg-type]
             encoder,
             obs_encoder=GraphObservationEncoder(),  # type: ignore[arg-type]
+            device=device,
         )
     raise ValueError(f"unknown encoder_kind: {arch.encoder_kind!r}")
 
