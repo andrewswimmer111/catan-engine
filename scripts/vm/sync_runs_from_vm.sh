@@ -55,19 +55,22 @@ mkdir -p "$LOCAL_RUNS_DIR"
 # rsync flags rationale:
 #   -a                preserve timestamps / perms (so partial-checks work)
 #   -z                compress in transit; cheap CPU win on a slow link
-#   --partial         keep partial files for resumption
-#   --append-verify   resume large files (snapshots / final.pt) with checksum
-#                     verification at the boundary
+#   --partial         keep partial files for resumption (rsync reuses them
+#                     as the basis for the next transfer; for our run sizes
+#                     this is enough — we don't need --append-verify here)
 #   --timeout=60      bail on stalled connections rather than hanging
 #                     until cron's next tick walks over us
-#   --info=...        machine-parseable totals at the end; quiet otherwise
+#   --stats           summary block at the end (transfer + file counts)
 #   --exclude         skip noise that doesn't help local eval
+#
+# Flags intentionally kept to the lowest common denominator that macOS's
+# stock rsync 2.6.9 supports: --append-verify and --info=... are nicer
+# on modern rsync 3.x (brew install rsync) but we don't depend on them.
 RSYNC_FLAGS=(
     -a -z
     --partial
-    --append-verify
     --timeout=60
-    --info=stats2,progress0
+    --stats
     --exclude='__pycache__/'
     --exclude='*.pyc'
     --exclude='*.tmp'
