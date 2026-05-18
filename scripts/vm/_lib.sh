@@ -56,12 +56,14 @@ _resolve_local_repo() {
 
 _resolve_local_repo
 
-# Quote a string for safe inclusion in an SSH-side command. Wraps in
-# single quotes and escapes embedded single quotes (bash 3 friendly).
+# Quote a string for safe inclusion in an SSH-side command. Uses bash's
+# built-in ``printf '%q'`` which produces output that round-trips
+# through ``bash -c`` correctly for any input — including strings that
+# contain both single quotes and spaces (the home-rolled ``'\''``
+# pattern collapses on those because the outer single-quote span ends
+# before the substituted segment reopens it).
 _ssh_quote() {
-    local arg="$1"
-    # Replace each ' with '\'' then wrap the whole thing in single quotes.
-    printf "'%s'" "${arg//\'/\'\\\'\'}"
+    printf '%q' "$1"
 }
 
 # Print "[catan-vm] <msg>" to stderr so cron logs are scan-able.
