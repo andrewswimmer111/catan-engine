@@ -66,6 +66,7 @@ from rl.training.checkpoint import (
     obs_layout_version_for,
     save_checkpoint,
 )
+from rl.training.parallel_self_play import generate_games_parallel
 from rl.training.self_play import (
     SelfPlayConfig,
     SelfPlayGame,
@@ -108,6 +109,12 @@ class AZTrainConfig:
     eval_games: int = 20
     snapshot_every_iters: int = 5
     log_every_iters: int = 1
+
+    # Parallel self-play (az-009).
+    # ``0`` keeps the single-process loop (current default); ``>=1``
+    # spawns that many subprocess workers and round-robins self-play
+    # games across them on every iteration.
+    n_self_play_workers: int = 0
 
     # Seeding
     seed: int = 0
@@ -281,23 +288,40 @@ class AlphaZeroTrainer:
     # ------------------------------------------------------------------
 
     def _run_self_play(self) -> dict[str, float]:
-        """Generate ``games_per_iter`` games into the buffer; return stats."""
+        """Generate ``games_per_iter`` games into the buffer; return stats.
+
+        Dispatches to the parallel subprocess path
+        (:func:`generate_games_parallel`) when ``n_self_play_workers > 0``;
+        otherwise runs the games sequentially in this process.
+        """
         self._learner.model.eval()
+        game_seeds = [
+            self._cfg.seed * 1_000_003 + self._iteration * 10_007 + g_idx
+            for g_idx in range(self._cfg.games_per_iter)
+        ]
+
+        if self._cfg.n_self_play_workers > 0:
+            games = generate_games_parallel(
+                self._learner,
+                self._cfg.self_play,
+                game_seeds,
+                n_workers=self._cfg.n_self_play_workers,
+            )
+        else:
+            games = [
+                play_self_play_game(
+                    self._learner,
+                    self._cfg.self_play,
+                    self._self_play_rng,
+                    game_seed=seed,
+                )
+                for seed in game_seeds
+            ]
+
         winners: list[int | None] = []
         n_moves: list[int] = []
         n_transitions = 0
-        for g_idx in range(self._cfg.games_per_iter):
-            game_seed = (
-                self._cfg.seed * 1_000_003
-                + self._iteration * 10_007
-                + g_idx
-            )
-            game = play_self_play_game(
-                self._learner,
-                self._cfg.self_play,
-                self._self_play_rng,
-                game_seed=game_seed,
-            )
+        for game in games:
             self._buffer.extend(game.transitions)
             winners.append(game.winner_seat_idx)
             n_moves.append(game.n_moves)

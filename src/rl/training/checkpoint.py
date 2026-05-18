@@ -82,6 +82,7 @@ __all__ = [
     "CheckpointMeta",
     "IncompatibleCheckpointError",
     "ModelArch",
+    "build_agent_for_arch",
     "compute_config_hash",
     "load_checkpoint",
     "save_checkpoint",
@@ -293,6 +294,21 @@ def _validate_layout_versions(meta: CheckpointMeta) -> None:
             f"checkpoint action_layout_version={meta.action_layout_version} "
             f"!= current ACTION_LAYOUT_VERSION={ACTION_LAYOUT_VERSION}"
         )
+
+
+def build_agent_for_arch(
+    arch: ModelArch,
+    *,
+    device: str | torch.device = "cpu",
+) -> PolicyAgent:
+    """Construct a fresh :class:`PolicyAgent` matching ``arch`` on ``device``.
+
+    Public counterpart of the loader's internal dispatch — useful for
+    subprocess workers (az-009) and any other code path that needs to
+    rebuild a PolicyAgent from a serialised arch + state-dict pair
+    without writing the checkpoint to disk first.
+    """
+    return _build_agent_for_arch(arch, device=device)
 
 
 def _build_agent_for_arch(

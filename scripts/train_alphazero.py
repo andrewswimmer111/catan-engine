@@ -211,6 +211,15 @@ def build_parser() -> argparse.ArgumentParser:
              "opponent when learner_win_rate > THIS value. Default None "
              "(continuous training; refresh on every snapshot).",
     )
+    p.add_argument(
+        "--self-play-workers",
+        type=int,
+        default=0,
+        help="parallel-self-play subprocess workers. 0 (default) keeps "
+             "the single-process loop; >=1 spawns that many CPU workers "
+             "via the spawn start method. The parent's MPS / CUDA model "
+             "is untouched — workers receive a CPU-only state-dict copy.",
+    )
 
     # I/O.
     p.add_argument(
@@ -273,6 +282,7 @@ def _build_config(args: argparse.Namespace) -> AZTrainConfig:
         eval_games=args.eval_games,
         snapshot_every_iters=args.snapshot_every,
         log_every_iters=1,
+        n_self_play_workers=args.self_play_workers,
         seed=args.seed,
         player_ids=_PLAYER_IDS,
     )
