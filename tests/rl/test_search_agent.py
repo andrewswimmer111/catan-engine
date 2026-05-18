@@ -6,7 +6,7 @@ non-forced decision, and produces typed actions the engine accepts for a
 full game. Marked ``slow`` — even with a small rollout budget this runs
 ~10–30 seconds, well above the fast-suite budget.
 
-Also covers fast unit tests for :class:`_NetworkEvaluator`'s two
+Also covers fast unit tests for :class:`NetworkEvaluator`'s two
 value-head paths (``scalar`` vs ``vector``): they must produce identical
 absolute-seat value vectors when wrapped around the same underlying
 weights, modulo the unrotation arithmetic the vector path applies.
@@ -29,7 +29,7 @@ from rl.agents.heuristic_agent import HeuristicAgent  # noqa: E402
 from rl.agents.hybrid_agent import PlacementOverrideAgent  # noqa: E402
 from rl.agents.policy_agent import PolicyAgent  # noqa: E402
 from rl.agents.random_agent import RandomAgent  # noqa: E402
-from rl.agents.search_agent import SearchAgent, _NetworkEvaluator  # noqa: E402
+from rl.agents.search_agent import SearchAgent, NetworkEvaluator  # noqa: E402
 from rl.encoding._action_layout import ACTION_SPACE_SIZE  # noqa: E402
 from rl.encoding.action import ActionEncoder  # noqa: E402
 from rl.encoding.graph_observation import (  # noqa: E402
@@ -115,7 +115,7 @@ def test_search_agent_composes_with_placement_override(loaded_policy):
 
 
 # ----------------------------------------------------------------------
-# _NetworkEvaluator unit tests — both value-head paths
+# NetworkEvaluator unit tests — both value-head paths
 # ----------------------------------------------------------------------
 
 
@@ -129,7 +129,7 @@ _TINY_GNN = GNNArch(
 
 
 def _make_tiny_policy(value_kind: str, seed: int = 0) -> PolicyAgent:
-    """A small graph-encoder PolicyAgent for fast _NetworkEvaluator tests."""
+    """A small graph-encoder PolicyAgent for fast NetworkEvaluator tests."""
     arch = _dc_replace(_TINY_GNN, value_kind=value_kind)  # type: ignore[arg-type]
     torch.manual_seed(seed)
     model = GNNPolicyValue(
@@ -162,7 +162,7 @@ def _advance_env(seed: int, steps: int) -> CatanEnv:
 def test_network_evaluator_vector_path_value_vec_shape_and_priors() -> None:
     """Vector path: one forward, value_vec is per-seat and sums sensibly."""
     policy = _make_tiny_policy("vector")
-    evaluator = _NetworkEvaluator(policy)
+    evaluator = NetworkEvaluator(policy)
     env = _advance_env(seed=11, steps=10)
     legal = env.legal_actions()
     assert legal, "test setup: env should still have legal actions"
@@ -178,7 +178,7 @@ def test_network_evaluator_vector_path_value_vec_shape_and_priors() -> None:
 def test_network_evaluator_scalar_path_value_vec_shape_and_priors() -> None:
     """Scalar path: one batched 4-perspective forward; same Evaluator contract."""
     policy = _make_tiny_policy("scalar")
-    evaluator = _NetworkEvaluator(policy)
+    evaluator = NetworkEvaluator(policy)
     env = _advance_env(seed=13, steps=10)
     legal = env.legal_actions()
     assert legal
@@ -238,7 +238,7 @@ def test_network_evaluator_vector_unrotation_matches_acting_seat() -> None:
 
     policy.model.value_head = _ConstantValueHead(rotated)  # type: ignore[assignment]
 
-    evaluator = _NetworkEvaluator(policy)
+    evaluator = NetworkEvaluator(policy)
     _priors, value_vec = evaluator.evaluate(env.state, legal)
 
     # The model emits [1,2,3,4] rotated to viewer-as-slot-0 (so slot 0 =

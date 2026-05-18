@@ -34,7 +34,7 @@ from domain.game.state import GameState
 from rl.agents.policy_agent import PolicyAgent
 from rl.search.mcts import MCTSConfig, run_mcts
 
-__all__ = ["SearchAgent"]
+__all__ = ["SearchAgent", "NetworkEvaluator"]
 
 
 # Used for the fallback prior when the encoder represents no legal action
@@ -47,7 +47,7 @@ class SearchAgent:
     """PUCT MCTS wrapped around a trained :class:`PolicyAgent`.
 
     The wrapped policy is queried once per leaf expansion via
-    :class:`_NetworkEvaluator`. Models with a per-seat ``vector`` value
+    :class:`NetworkEvaluator`. Models with a per-seat ``vector`` value
     head only need a single forward (the acting seat's perspective) per
     leaf; models with a ``scalar`` value head need one batched forward
     across all four player perspectives to recover the per-seat value
@@ -63,7 +63,7 @@ class SearchAgent:
     ) -> None:
         self._policy = policy
         self._config = config if config is not None else MCTSConfig()
-        self._evaluator = _NetworkEvaluator(policy)
+        self._evaluator = NetworkEvaluator(policy)
 
     @property
     def policy(self) -> PolicyAgent:
@@ -94,7 +94,7 @@ class SearchAgent:
         return result.action
 
 
-class _NetworkEvaluator:
+class NetworkEvaluator:
     """:class:`rl.search.mcts.Evaluator` backed by a :class:`PolicyAgent`.
 
     Two leaf-eval paths depending on the wrapped model's value head:
