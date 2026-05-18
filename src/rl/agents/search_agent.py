@@ -46,11 +46,14 @@ _UNIFORM_PRIOR_FALLBACK_TAG: Final = "uniform-fallback"
 class SearchAgent:
     """PUCT MCTS wrapped around a trained :class:`PolicyAgent`.
 
-    The wrapped policy is queried twice per leaf expansion (in a single
-    batched forward pass across all four player perspectives) for the
-    per-seat value vector. The policy logits from the leaf's acting
-    player's perspective are softmaxed and gathered onto the legal-action
-    list to produce the MCTS prior.
+    The wrapped policy is queried once per leaf expansion via
+    :class:`_NetworkEvaluator`. Models with a per-seat ``vector`` value
+    head only need a single forward (the acting seat's perspective) per
+    leaf; models with a ``scalar`` value head need one batched forward
+    across all four player perspectives to recover the per-seat value
+    vector MCTS backs up. In both cases the leaf's acting player's
+    masked policy logits are softmaxed and gathered onto the
+    legal-action list to produce the MCTS prior.
     """
 
     def __init__(
@@ -94,13 +97,17 @@ class SearchAgent:
 class _NetworkEvaluator:
     """:class:`rl.search.mcts.Evaluator` backed by a :class:`PolicyAgent`.
 
-    Single batched forward over all four player perspectives gives:
+    Two leaf-eval paths depending on the wrapped model's value head:
 
-    * ``value_vec`` — ``out.value`` shape ``(4,)``, slot ``i`` is the value
-      head's prediction from ``state.config.player_ids[i]``'s view.
-    * ``priors`` — ``softmax(out.logits[acting_idx])`` masked to the
-      encoder's representation of ``legal`` and gathered onto the
-      legal-action list, normalised to sum to 1.
+    * **Vector head** (``value_kind="vector"``, AZ-style). A single
+      forward from the acting seat's perspective gives both the acting
+      seat's masked logits (priors) and the full ``(N_PLAYERS,)`` value
+      vector — already rotated to viewer-as-slot-0. The vector is rolled
+      back to absolute seat indexing for MCTS backup.
+    * **Scalar head** (``value_kind="scalar"``, PPO back-compat). One
+      batched forward across all four seat perspectives gives the
+      per-seat value vector slot-by-slot; the acting seat's row supplies
+      priors.
 
     If no legal action is encodable (mask is all False), the priors fall
     back to uniform over ``legal`` — the same defensive convention
@@ -113,6 +120,10 @@ class _NetworkEvaluator:
         self._obs_encoder = policy.obs_encoder
         self._action_encoder = policy.action_encoder
         self._device = policy.device
+        # Per the model contract: GNN exposes ``value_kind`` via the arch
+        # dataclass; MLP exposes it as a class attribute. Defaulting to
+        # ``"scalar"`` is safe for any future model that doesn't declare.
+        self._value_kind: str = getattr(self._model, "value_kind", "scalar")
 
     def evaluate(
         self, state: GameState, legal: list[Action]
@@ -120,21 +131,16 @@ class _NetworkEvaluator:
         pids = list(state.config.player_ids)
         n_players = len(pids)
         acting_idx = _find_acting_seat(state)
-
-        # Stack the four perspectives into a (4, obs_dim) batch.
-        obs_batch = np.stack(
-            [self._obs_encoder.encode(make_player_view(state, p)) for p in pids]
-        )
         mask = self._action_encoder.mask(legal)
-        mask_batch = np.tile(mask, (n_players, 1))
 
-        obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=self._device)
-        mask_t = torch.as_tensor(mask_batch, dtype=torch.bool, device=self._device)
-        with torch.no_grad():
-            out = self._model(obs_t, mask_t)
-
-        value_vec = out.value.detach().cpu().numpy().astype(np.float64)
-        logits_acting = out.logits[acting_idx]
+        if self._value_kind == "vector":
+            value_vec, logits_acting = self._eval_vector(
+                state, pids[acting_idx], mask, acting_idx, n_players
+            )
+        else:
+            value_vec, logits_acting = self._eval_scalar(
+                state, pids, mask, acting_idx, n_players
+            )
 
         priors = _priors_over_legal(
             logits_acting=logits_acting,
@@ -143,6 +149,55 @@ class _NetworkEvaluator:
             action_encoder=self._action_encoder,
         )
         return priors, value_vec
+
+    def _eval_vector(
+        self,
+        state: GameState,
+        acting_pid,
+        mask: np.ndarray,
+        acting_idx: int,
+        n_players: int,
+    ) -> tuple[np.ndarray, torch.Tensor]:
+        """One forward at the acting seat; unrotate the value vec to absolute seats."""
+        obs = self._obs_encoder.encode(make_player_view(state, acting_pid))
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self._device).unsqueeze(0)
+        mask_t = torch.as_tensor(mask, dtype=torch.bool, device=self._device).unsqueeze(0)
+        with torch.no_grad():
+            out = self._model(obs_t, mask_t)
+
+        # The value head outputs (1, n_players) with slot 0 = acting seat,
+        # slot k = the seat at turn-order offset k from acting. Roll to
+        # absolute seat order so MCTS backup can index by seat directly.
+        rotated = out.value[0].detach().cpu().numpy().astype(np.float64)
+        if rotated.shape != (n_players,):
+            raise ValueError(
+                f"vector value-head produced shape {rotated.shape}, "
+                f"expected ({n_players},)"
+            )
+        value_vec = np.roll(rotated, acting_idx)
+        return value_vec, out.logits[0]
+
+    def _eval_scalar(
+        self,
+        state: GameState,
+        pids,
+        mask: np.ndarray,
+        acting_idx: int,
+        n_players: int,
+    ) -> tuple[np.ndarray, torch.Tensor]:
+        """Four perspectives in one batch; concatenate the scalar values."""
+        obs_batch = np.stack(
+            [self._obs_encoder.encode(make_player_view(state, p)) for p in pids]
+        )
+        mask_batch = np.tile(mask, (n_players, 1))
+
+        obs_t = torch.as_tensor(obs_batch, dtype=torch.float32, device=self._device)
+        mask_t = torch.as_tensor(mask_batch, dtype=torch.bool, device=self._device)
+        with torch.no_grad():
+            out = self._model(obs_t, mask_t)
+
+        value_vec = out.value.detach().cpu().numpy().astype(np.float64)
+        return value_vec, out.logits[acting_idx]
 
 
 def _find_acting_seat(state: GameState) -> int:
