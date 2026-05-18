@@ -175,7 +175,9 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     if args.games <= 0:
         print(f"error: --games must be positive (got {args.games})", file=sys.stderr)
         return 2
-    device = _resolve_eval_device(args.device)
+    from rl.utils.device import resolve_device
+
+    device = resolve_device(args.device)
     learner_agent, learner_label = _load_learner(args.learner, device=device)
     if args.use_mcts:
         cfg = MCTSConfig(
@@ -309,26 +311,6 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 def _env_factory(seed: int) -> CatanEnv:
     return CatanEnv(seed=seed)
-
-
-def _resolve_eval_device(spec: str):
-    """Mirror of :func:`scripts.train._resolve_device` for the eval CLI."""
-    import torch
-
-    if spec == "cuda":
-        if not torch.cuda.is_available():
-            raise SystemExit(
-                "error: --device cuda but torch.cuda.is_available()=False"
-            )
-        return torch.device("cuda")
-    if spec == "mps":
-        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
-            raise SystemExit(
-                "error: --device mps but torch MPS backend is unavailable "
-                "(macOS + Metal-supporting GPU required)"
-            )
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 def _load_learner(path: Path, *, device=None) -> tuple[PolicyAgent, str]:
