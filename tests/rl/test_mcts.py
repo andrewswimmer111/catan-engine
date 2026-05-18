@@ -380,3 +380,232 @@ def test_terminal_value_stalemate_is_zero_vector():
     s.phase = TurnPhase.STALEMATE
     v = _terminal_value(s, N_PLAYERS)
     np.testing.assert_array_equal(v, np.zeros(N_PLAYERS))
+
+
+# ----------------------------------------------------------------------
+# Dirichlet root noise
+# ----------------------------------------------------------------------
+
+
+def test_default_config_does_not_perturb_root_priors() -> None:
+    """``dirichlet_epsilon=0`` (the default) leaves the prior untouched —
+    a regression here would silently corrupt every existing eval that
+    relies on the network's prior dominating PUCT's first-visit pick.
+    """
+    state = _initial_state()
+    engine = _engine()
+    legal = engine.legal_actions(state)
+    # Spike a known prior on a known index; verify it survives run_mcts.
+    target_idx = 5
+
+    def prior_picker(s, legals):
+        p = np.full(len(legals), 0.01 / max(len(legals) - 1, 1))
+        if s.phase is state.phase and len(legals) > target_idx:
+            p[target_idx] = 0.99
+        return p / p.sum()
+
+    def value_picker(_s):
+        return np.full(N_PLAYERS, 0.25)
+
+    # Reach into the internal API: build the root + apply (would-be) noise
+    # under the default config, then compare with the un-noisy prior.
+    from rl.search.mcts import _make_node
+
+    ev = _ScriptedEval(prior_picker, value_picker)
+    root = _make_node(state, ev, engine, N_PLAYERS)
+    # With dirichlet_epsilon=0 there's no _apply_root_dirichlet_noise call;
+    # verify the public run_mcts path preserves the visit-count argmax that
+    # the spike would dominate without noise.
+    result = run_mcts(state, ev, MCTSConfig(rollouts=30, seed=0), engine=_engine())
+    assert result.legal_actions[target_idx] == result.action
+    # Prior on the spike survived too — defensive check.
+    spiked = next(
+        e for e, a in zip(root.edges, root.legal_actions)
+        if a == legal[target_idx]
+    )
+    assert spiked.prior > 0.9
+
+
+def test_dirichlet_noise_modifies_root_priors_when_enabled() -> None:
+    """With ``dirichlet_epsilon > 0``, the spiked prior is *blended* with
+    Dirichlet noise so the dominated index no longer holds ~all the mass.
+    """
+    state = _initial_state()
+    engine = _engine()
+    target_idx = 5
+
+    def prior_picker(s, legals):
+        p = np.full(len(legals), 0.001 / max(len(legals) - 1, 1))
+        if s.phase is state.phase and len(legals) > target_idx:
+            p[target_idx] = 0.999
+        return p / p.sum()
+
+    def value_picker(_s):
+        return np.full(N_PLAYERS, 0.25)
+
+    # Apply noise by hand using the same helper run_mcts would call,
+    # then compare to the un-noisy prior.
+    from rl.search.mcts import _make_node, _apply_root_dirichlet_noise
+
+    ev = _ScriptedEval(prior_picker, value_picker)
+    cfg = MCTSConfig(rollouts=5, seed=42, dirichlet_alpha=0.3, dirichlet_epsilon=0.5)
+
+    root_noisy = _make_node(state, ev, engine, N_PLAYERS)
+    pre_noise = [e.prior for e in root_noisy.edges]
+    _apply_root_dirichlet_noise(
+        root_noisy, cfg, np.random.default_rng(cfg.seed)
+    )
+    post_noise = [e.prior for e in root_noisy.edges]
+
+    # Priors changed.
+    assert pre_noise != post_noise
+    # Still a valid distribution (sums to 1).
+    assert pytest.approx(sum(post_noise), rel=1e-9) == 1.0
+    # The spiked index's prior strictly decreased — noise blended in
+    # mass from other indices.
+    assert post_noise[target_idx] < pre_noise[target_idx]
+
+
+def test_dirichlet_noise_affects_only_root_edges() -> None:
+    """Children expanded during simulation must keep their un-noisy
+    network priors. Verified by stub-evaluating an isolated child and
+    asserting its priors match the network output verbatim — only the
+    root edges show the (root-only) noise blend.
+    """
+    from rl.search.mcts import _make_node, _apply_root_dirichlet_noise
+
+    state = _initial_state()
+    engine = _engine()
+
+    def prior_picker(_s, legals):
+        n = len(legals)
+        p = np.zeros(n)
+        if n > 0:
+            p[0] = 1.0
+        return p
+
+    def value_picker(_s):
+        return np.full(N_PLAYERS, 0.25)
+
+    ev = _ScriptedEval(prior_picker, value_picker)
+    cfg = MCTSConfig(rollouts=1, seed=7, dirichlet_alpha=0.3, dirichlet_epsilon=0.5)
+
+    root = _make_node(state, ev, engine, N_PLAYERS)
+    _apply_root_dirichlet_noise(root, cfg, np.random.default_rng(cfg.seed))
+    # Build a separate child node off the same state; verify it gets the
+    # unmodified prior (the noise helper is not applied to it).
+    child = _make_node(state, ev, engine, N_PLAYERS)
+    child_priors = [e.prior for e in child.edges]
+    # Network's spike-at-index-0 prior survives in the child.
+    assert child_priors[0] == 1.0
+    assert all(p == 0.0 for p in child_priors[1:])
+    # Root's spike is blended.
+    root_priors = [e.prior for e in root.edges]
+    assert root_priors[0] < 1.0
+
+
+def test_dirichlet_noise_determinism_under_fixed_seed() -> None:
+    """Same ``config.seed`` → same Dirichlet sample → same blended priors."""
+    from rl.search.mcts import _make_node, _apply_root_dirichlet_noise
+
+    state = _initial_state()
+    engine = _engine()
+    ev = _UniformEval()
+    cfg = MCTSConfig(rollouts=1, seed=99, dirichlet_epsilon=0.4)
+
+    r1 = _make_node(state, ev, engine, N_PLAYERS)
+    _apply_root_dirichlet_noise(r1, cfg, np.random.default_rng(cfg.seed))
+    r2 = _make_node(state, ev, engine, N_PLAYERS)
+    _apply_root_dirichlet_noise(r2, cfg, np.random.default_rng(cfg.seed))
+
+    p1 = [e.prior for e in r1.edges]
+    p2 = [e.prior for e in r2.edges]
+    np.testing.assert_array_equal(p1, p2)
+
+
+# ----------------------------------------------------------------------
+# MCTSResult.policy_distribution / temperature
+# ----------------------------------------------------------------------
+
+
+def test_policy_distribution_argmax_at_zero_temperature() -> None:
+    """``T == 0`` returns a one-hot on the most-visited action."""
+    from rl.search.mcts import MCTSResult
+
+    counts = np.array([1, 7, 3, 0, 5])
+    result = MCTSResult(
+        action=None,  # type: ignore[arg-type]
+        visit_counts=counts,
+        legal_actions=[None] * counts.size,  # type: ignore[list-item]
+    )
+    dist = result.policy_distribution(temperature=0.0)
+    expected = np.zeros(counts.size)
+    expected[1] = 1.0
+    np.testing.assert_array_equal(dist, expected)
+
+
+def test_policy_distribution_proportional_at_unit_temperature() -> None:
+    """``T == 1`` returns counts / sum(counts) — the AZ policy target."""
+    from rl.search.mcts import MCTSResult
+
+    counts = np.array([1, 7, 3, 0, 5])
+    result = MCTSResult(
+        action=None,  # type: ignore[arg-type]
+        visit_counts=counts,
+        legal_actions=[None] * counts.size,  # type: ignore[list-item]
+    )
+    dist = result.policy_distribution(temperature=1.0)
+    np.testing.assert_allclose(dist, counts / counts.sum())
+
+
+def test_policy_distribution_concentrates_as_temperature_decreases() -> None:
+    """``T → 0⁺`` should sharpen toward argmax; ``T → ∞`` flattens toward
+    uniform. Verify both directions on a clear-winner counts vector."""
+    from rl.search.mcts import MCTSResult
+
+    counts = np.array([1, 5, 2, 0])
+    result = MCTSResult(
+        action=None,  # type: ignore[arg-type]
+        visit_counts=counts,
+        legal_actions=[None] * counts.size,  # type: ignore[list-item]
+    )
+
+    proportional = counts / counts.sum()
+    sharp = result.policy_distribution(temperature=0.1)
+    flat = result.policy_distribution(temperature=10.0)
+
+    # Sharper: argmax index gets > proportional share.
+    argmax_idx = int(counts.argmax())
+    assert sharp[argmax_idx] > proportional[argmax_idx]
+    # Flatter: argmax index gets < proportional share.
+    assert flat[argmax_idx] < proportional[argmax_idx]
+    # Both still valid distributions over the same support.
+    assert pytest.approx(sharp.sum(), rel=1e-9) == 1.0
+    assert pytest.approx(flat.sum(), rel=1e-9) == 1.0
+
+
+def test_policy_distribution_rejects_negative_temperature() -> None:
+    from rl.search.mcts import MCTSResult
+
+    result = MCTSResult(
+        action=None,  # type: ignore[arg-type]
+        visit_counts=np.array([1, 2]),
+        legal_actions=[None, None],  # type: ignore[list-item]
+    )
+    with pytest.raises(ValueError, match="temperature"):
+        result.policy_distribution(temperature=-1.0)
+
+
+def test_policy_distribution_handles_zero_visits_uniform_fallback() -> None:
+    """If every visit count is zero (degenerate empty search),
+    ``policy_distribution`` falls back to uniform so the result is still
+    a valid distribution."""
+    from rl.search.mcts import MCTSResult
+
+    result = MCTSResult(
+        action=None,  # type: ignore[arg-type]
+        visit_counts=np.array([0, 0, 0]),
+        legal_actions=[None, None, None],  # type: ignore[list-item]
+    )
+    dist = result.policy_distribution(temperature=1.0)
+    np.testing.assert_allclose(dist, np.full(3, 1.0 / 3))

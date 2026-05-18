@@ -106,12 +106,33 @@ class MCTSConfig:
     * ``c_puct`` — exploration coefficient in the PUCT formula. Higher
       values explore more; AlphaZero used 1.25 but Catan's high branching
       factor benefits from ~2.0 in early experiments.
-    * ``seed`` — controls dice-outcome sampling for reproducibility.
+    * ``seed`` — controls dice-outcome sampling and Dirichlet noise
+      sampling for reproducibility.
+    * ``dirichlet_alpha`` — concentration parameter of the Dirichlet
+      distribution used to inject root-only exploration noise. AlphaZero
+      uses ``alpha ≈ 10 / avg_legal_moves``; Catan's branching factor
+      varies wildly (~5–50), so the canonical chess value ``0.3`` is a
+      reasonable starting point. Only effective when
+      ``dirichlet_epsilon > 0``.
+    * ``dirichlet_epsilon`` — mix weight for Dirichlet noise:
+      ``prior ← (1 - eps) * prior + eps * Dir(alpha)``. ``0`` (the
+      default) disables noise entirely — required during evaluation, but
+      AlphaZero self-play sets it to ``0.25``.
+    * ``temperature`` — softening exponent for
+      :meth:`MCTSResult.policy_distribution`. ``1.0`` (the default)
+      returns visit-proportional probabilities suitable for sampling
+      during early-game self-play; ``0.0`` returns a one-hot on the
+      argmax suitable for late-game / evaluation play. ``run_mcts``
+      itself always returns the argmax action; the caller decides
+      whether to sample from :meth:`policy_distribution` instead.
     """
 
     rollouts: int = 100
     c_puct: float = 2.0
     seed: int = 0
+    dirichlet_alpha: float = 0.3
+    dirichlet_epsilon: float = 0.0
+    temperature: float = 1.0
 
 
 @dataclass
@@ -128,6 +149,44 @@ class MCTSResult:
     action: Action
     visit_counts: np.ndarray
     legal_actions: list[Action]
+
+    def policy_distribution(self, temperature: float) -> np.ndarray:
+        """Visit-count distribution softened by ``temperature``.
+
+        * ``temperature == 0.0`` returns a one-hot on the most-visited
+          action (deterministic exploitation). Ties are broken by the
+          first index (numpy ``argmax`` semantics) so the result is
+          stable.
+        * ``temperature == 1.0`` returns
+          ``visit_counts / visit_counts.sum()`` (sample proportional to
+          N).
+        * Other ``temperature > 0`` returns
+          ``visit_counts ** (1/T) / sum(...)``: ``T → 0⁺`` concentrates
+          on argmax, ``T → ∞`` flattens to uniform.
+
+        Used as the policy *target* for AlphaZero training (always at
+        ``T == 1.0``, regardless of the action actually sampled during
+        self-play). The same distribution can be used at sampling time
+        with a different ``T`` for the temperature schedule.
+        """
+        if temperature < 0:
+            raise ValueError(f"temperature must be >= 0; got {temperature}")
+        n = self.visit_counts.shape[0]
+        if n == 0:
+            return np.zeros(0, dtype=np.float64)
+        if temperature == 0.0:
+            out = np.zeros(n, dtype=np.float64)
+            out[int(self.visit_counts.argmax())] = 1.0
+            return out
+        # ``counts`` is non-negative integer-valued; the ** below stays
+        # finite for any temperature > 0.
+        counts = self.visit_counts.astype(np.float64, copy=False)
+        powered = counts ** (1.0 / temperature)
+        total = powered.sum()
+        if total <= 0.0:
+            # No visits anywhere — return uniform so the distribution still sums to 1.
+            return np.full(n, 1.0 / n, dtype=np.float64)
+        return powered / total
 
 
 # ----------------------------------------------------------------------
@@ -224,6 +283,17 @@ def run_mcts(
         raise ValueError("run_mcts called on a terminal state")
     if not root.legal_actions:
         raise ValueError("run_mcts called on a state with no legal actions")
+
+    # Inject Dirichlet exploration noise at the root only — children
+    # expanded during simulation keep their network priors untouched.
+    # This is the standard AlphaZero pattern; without it self-play
+    # converges on a narrow set of openings because the prior is the
+    # only thing distinguishing equally-Q'd actions on the first visit.
+    if config.dirichlet_epsilon > 0.0:
+        # Use a numpy RNG seeded from the same source as the dice RNG so
+        # the whole search is reproducible from one ``config.seed``.
+        np_rng = np.random.default_rng(config.seed)
+        _apply_root_dirichlet_noise(root, config, np_rng)
 
     for _ in range(config.rollouts):
         _simulate(root, evaluator, engine, config, rng)
@@ -440,6 +510,27 @@ def _make_node(
     if not lazy:
         _evaluate_leaf(node, evaluator)
     return node
+
+
+def _apply_root_dirichlet_noise(
+    root: _DecisionNode,
+    config: MCTSConfig,
+    np_rng: np.random.Generator,
+) -> None:
+    """Blend Dirichlet noise into the root's edge priors in-place.
+
+    Formula: ``P'(s, a) = (1 - eps) * P(s, a) + eps * eta(a)`` where
+    ``eta ~ Dir(alpha, ..., alpha)`` over the root's legal actions.
+    Mutates ``root.edges[i].prior`` directly; children expanded later
+    during simulation are unaffected.
+    """
+    n = len(root.edges)
+    if n == 0:
+        return
+    eps = config.dirichlet_epsilon
+    eta = np_rng.dirichlet([config.dirichlet_alpha] * n)
+    for i, edge in enumerate(root.edges):
+        edge.prior = float((1.0 - eps) * edge.prior + eps * eta[i])
 
 
 def _evaluate_leaf(node: _DecisionNode, evaluator: Evaluator) -> None:
