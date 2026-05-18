@@ -157,19 +157,24 @@ fi
 
 if [[ "$ACTION" == "logs" ]]; then
     # The remote runs land under $CATAN_VM_REPO/runs/az_<timestamp>/.
-    # Show the newest one's progress.md.
+    # Show the newest one's progress.md. We pass the repo path as a
+    # positional arg to the remote bash so the tilde expansion happens
+    # on the remote side (where $HOME is defined) rather than relying
+    # on the env var being set there.
     log "tailing latest progress.md on $CATAN_VM_HOST"
-    _remote bash -c "
-        set -euo pipefail
-        cd '$CATAN_VM_REPO' 2>/dev/null || cd \"\${CATAN_VM_REPO/#\\~/\$HOME}\"
-        latest=\$(ls -dt runs/az_* 2>/dev/null | head -n1 || true)
-        if [[ -z \"\$latest\" ]]; then
-            echo 'no runs/az_* directory found on VM'
-            exit 1
-        fi
-        echo \"=== \$latest/progress.md ===\"
-        cat \"\$latest/progress.md\" 2>/dev/null || echo '(progress.md not yet written)'
-    "
+    ssh "$CATAN_VM_HOST" bash -s -- "$(_ssh_quote "$CATAN_VM_REPO")" <<'REMOTE'
+set -euo pipefail
+REPO="$1"
+REPO="${REPO/#\~/$HOME}"
+cd "$REPO"
+latest=$(ls -dt runs/az_* 2>/dev/null | head -n1 || true)
+if [[ -z "$latest" ]]; then
+    echo 'no runs/az_* directory found on VM'
+    exit 1
+fi
+echo "=== $latest/progress.md ==="
+cat "$latest/progress.md" 2>/dev/null || echo '(progress.md not yet written)'
+REMOTE
     exit $?
 fi
 
