@@ -30,11 +30,25 @@ def _shared_v(top, e1: EdgeID, e2: EdgeID) -> VertexID | None:
 def _path_of_len(
     s: GameState, start: EdgeID, length: int, pid: PlayerID
 ) -> list[EdgeID] | None:
+    """Find a length-``length`` linear road chain starting at ``start``.
+
+    A *linear* chain: edge i+1 attaches at the vertex of edge i that the
+    chain hasn't yet been built from. Walks vertex-by-vertex through
+    each edge's *current endpoint*, not via arbitrary shared vertices —
+    otherwise the walker accepts branching "paths" that the real
+    longest-road rule rejects (see
+    :func:`domain.rules.longest_road._max_extension_from_vertex`).
+
+    A vertex with an opponent building blocks extension through it; the
+    chain may still *end* at such a vertex, just not continue past it.
+    """
     top = s.topology
     found: list[EdgeID] | None = None
 
     def walk(
-        cur: EdgeID, visited: frozenset[EdgeID], chain: list[EdgeID]
+        at_vertex: VertexID,
+        visited: frozenset[EdgeID],
+        chain: list[EdgeID],
     ) -> None:
         nonlocal found
         if found is not None:
@@ -42,19 +56,22 @@ def _path_of_len(
         if len(chain) == length:
             found = list(chain)
             return
-        e = top.edges[cur]
-        for nxt in e.adjacent_edges:
+        b = s.occupancy.buildings.get(at_vertex)
+        if b is not None and b[0] != pid:
+            return
+        for nxt in top.vertices[at_vertex].adjacent_edges:
             if nxt in visited:
                 continue
-            v = _shared_v(top, cur, nxt)
-            if v is None:
-                continue
-            b = s.occupancy.buildings.get(v)
-            if b is not None and b[0] != pid:
-                continue
-            walk(nxt, visited | {nxt}, chain + [nxt])
+            v1, v2 = top.edges[nxt].vertices
+            next_vertex = v2 if v1 == at_vertex else v1
+            walk(next_vertex, visited | {nxt}, chain + [nxt])
 
-    walk(start, frozenset({start}), [start])
+    v1, v2 = top.edges[start].vertices
+    # Try extending from both endpoints of the starting edge so we don't
+    # miss chains that grow in only one direction.
+    walk(v2, frozenset({start}), [start])
+    if found is None:
+        walk(v1, frozenset({start}), [start])
     return found
 
 
