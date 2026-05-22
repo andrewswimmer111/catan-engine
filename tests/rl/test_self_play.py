@@ -33,6 +33,7 @@ from rl.encoding.graph_observation import (  # noqa: E402
 )
 from rl.models.gnn import GNNArch, GNNPolicyValue  # noqa: E402
 from rl.search.mcts import MCTSConfig  # noqa: E402
+from rl.stalemate_value import StalemateValueConfig  # noqa: E402
 from rl.training.self_play import (  # noqa: E402
     SelfPlayConfig,
     SelfPlayGame,
@@ -45,6 +46,10 @@ from rl.training.self_play import (  # noqa: E402  pull internals for unit tests
     _temperature_for,
     _terminal_outcome,
 )
+
+
+_FLAT_QUARTER_PENALTY = StalemateValueConfig(shape="flat", flat_value=-0.25)
+_FLAT_ZERO = StalemateValueConfig(shape="flat", flat_value=0.0)
 
 
 PLAYER_IDS = [PlayerID(i) for i in range(1, 5)]
@@ -104,24 +109,86 @@ def _fake_state(winner: PlayerID | None, phase: TurnPhase):
 
 def test_terminal_outcome_winner_is_one_hot() -> None:
     state = _fake_state(winner=PLAYER_IDS[2], phase=TurnPhase.GAME_OVER)
-    out = _terminal_outcome(state, N_PLAYERS, stalemate_value=-0.25)
+    out = _terminal_outcome(state, N_PLAYERS, _FLAT_QUARTER_PENALTY)
     expected = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
     np.testing.assert_array_equal(out, expected)
 
 
-def test_terminal_outcome_stalemate_applies_stalemate_value() -> None:
-    """The locked Phase-3 design decision: stalemate target is the
-    user-configured soft penalty (default −0.25) for every seat."""
+def test_terminal_outcome_stalemate_uses_flat_value() -> None:
+    """``shape='flat'`` returns ``flat_value`` for every seat — the legacy
+    constant-target regime, retained for back-compat and A/B baselines."""
     state = _fake_state(winner=None, phase=TurnPhase.STALEMATE)
-    out = _terminal_outcome(state, N_PLAYERS, stalemate_value=-0.25)
+    out = _terminal_outcome(state, N_PLAYERS, _FLAT_QUARTER_PENALTY)
     np.testing.assert_allclose(out, np.full(N_PLAYERS, -0.25))
 
 
-def test_terminal_outcome_stalemate_value_is_tunable() -> None:
-    """Caller can override stalemate_value (e.g. for 0.0 pure-AZ studies)."""
+def test_terminal_outcome_stalemate_flat_value_is_tunable() -> None:
+    """Caller can swap in a different flat constant (e.g. 0.0 to reproduce
+    the canonical pure-AZ draw-is-zero baseline)."""
     state = _fake_state(winner=None, phase=TurnPhase.STALEMATE)
-    out = _terminal_outcome(state, N_PLAYERS, stalemate_value=0.0)
+    out = _terminal_outcome(state, N_PLAYERS, _FLAT_ZERO)
     np.testing.assert_array_equal(out, np.zeros(N_PLAYERS, dtype=np.float32))
+
+
+# ----------------------------------------------------------------------
+# StalemateValueConfig — vp_linear shape (the new default)
+# ----------------------------------------------------------------------
+
+
+def test_vp_linear_endpoints_bracket_the_band() -> None:
+    """Construct an artificial VP vector that lights up both corners of
+    the band; targets must sit exactly at ``high`` (leader at 10+ VP)
+    and ``low`` (last-place at 0 VP)."""
+    cfg = StalemateValueConfig(shape="vp_linear", low=-0.5, high=-0.1)
+    vps = np.array([10.0, 5.0, 3.0, 0.0])
+    out = cfg._vp_linear(vps)
+    # Leader: rank_score=1, vp_score=clip(10/10,0,1)=1 → combined=1 → high.
+    assert pytest.approx(out[0], abs=1e-6) == -0.1
+    # Last: rank_score=0, vp_score=0 → combined=0 → low.
+    assert pytest.approx(out[-1], abs=1e-6) == -0.5
+    # Middle seats sit strictly inside the band, monotonically by VP.
+    assert -0.5 < out[2] < out[1] < -0.1
+
+
+def test_vp_linear_all_zero_vp_yields_band_midpoint() -> None:
+    """Symmetric case: every seat at 0 VP → all share rank=0 → all the
+    same target. Should sit at the midpoint of [low, high] because
+    rank_score=1 (everyone tied at the top) and vp_score=0."""
+    cfg = StalemateValueConfig(shape="vp_linear", low=-0.5, high=-0.1)
+    vps = np.zeros(4)
+    out = cfg._vp_linear(vps)
+    # combined = 0.5 * 1 + 0.5 * 0 = 0.5 → −0.5 + 0.4*0.5 = −0.3.
+    np.testing.assert_allclose(out, np.full(4, -0.3), atol=1e-6)
+
+
+def test_vp_linear_tied_seats_get_identical_targets() -> None:
+    """Two seats at 5 VP should both get the same target — competitive
+    ranking ties → identical rank score → identical VP score → equal."""
+    cfg = StalemateValueConfig(shape="vp_linear")
+    vps = np.array([5.0, 5.0, 3.0, 0.0])
+    out = cfg._vp_linear(vps)
+    assert out[0] == pytest.approx(out[1])
+    assert out[0] > out[2] > out[3]
+
+
+def test_vp_linear_clips_vp_above_winning_threshold() -> None:
+    """A 12 VP terminal stalemate (rare but possible via dev cards +
+    truncation) should clip to the 10 VP score — otherwise the band
+    semantics break."""
+    cfg = StalemateValueConfig(shape="vp_linear")
+    vps_capped = cfg._vp_linear(np.array([10.0, 5.0, 3.0, 0.0]))
+    vps_over = cfg._vp_linear(np.array([12.0, 5.0, 3.0, 0.0]))
+    np.testing.assert_allclose(vps_capped, vps_over)
+
+
+def test_stalemate_config_rejects_inverted_band() -> None:
+    with pytest.raises(ValueError, match="high"):
+        StalemateValueConfig(shape="vp_linear", low=-0.1, high=-0.5)
+
+
+def test_stalemate_config_rejects_unknown_shape() -> None:
+    with pytest.raises(ValueError, match="unknown stalemate shape"):
+        StalemateValueConfig(shape="rank_only")  # type: ignore[arg-type]
 
 
 # ----------------------------------------------------------------------
@@ -307,16 +374,21 @@ def test_play_self_play_value_targets_match_outcome() -> None:
                 absolute[i], rel=1e-5
             )
 
-    # Outcome-vector shape: one winner slot at 1.0 + rest 0.0, OR all equal
-    # (stalemate with the configured penalty).
+    # Outcome-vector shape: one winner slot at 1.0 + rest 0.0, OR every
+    # entry in the stalemate target band (vp_linear default → [-0.5, -0.1]).
     if game.winner_seat_idx is not None:
         expected = np.zeros(N_PLAYERS, dtype=np.float32)
         expected[game.winner_seat_idx] = 1.0
         np.testing.assert_allclose(absolute, expected)
     else:
-        np.testing.assert_allclose(
-            absolute, np.full(N_PLAYERS, cfg.stalemate_value)
-        )
+        stalemate = cfg.stalemate
+        if stalemate.shape == "flat":
+            np.testing.assert_allclose(
+                absolute, np.full(N_PLAYERS, stalemate.flat_value)
+            )
+        else:
+            assert ((absolute >= stalemate.low - 1e-6)
+                    & (absolute <= stalemate.high + 1e-6)).all()
 
 
 @pytest.mark.slow
@@ -330,14 +402,14 @@ def test_play_self_play_max_moves_truncates_as_stalemate() -> None:
         mcts=MCTSConfig(rollouts=2, c_puct=2.0, seed=0),
         temperature_threshold_moves=2,
         max_moves=12,
-        stalemate_value=-0.25,
+        stalemate=_FLAT_QUARTER_PENALTY,
     )
     game = play_self_play_game(network, cfg, random.Random(0), game_seed=2)
     # We capped at 12 moves; on a near-untrained tiny net we should hit
     # the cap rather than terminate naturally.
     assert game.n_moves == 12
     assert game.winner_seat_idx is None
-    # Every transition's rotated value target equals the stalemate value
+    # Every transition's rotated value target equals the flat-shape value
     # for every seat.
     for t in game.transitions:
         np.testing.assert_allclose(

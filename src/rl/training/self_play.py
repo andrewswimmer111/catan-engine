@@ -21,11 +21,10 @@ The output is a :class:`SelfPlayGame` carrying one
   so the acting seat sits in slot 0 (matching the
   ``value_kind="vector"`` model output convention from az-001).
 
-Stalemate gets a soft-penalty value target (``-0.25`` for every seat by
-default; see ``SelfPlayConfig.stalemate_value``), not zero. This is the
-locked-in design decision from the Phase 3 design pass — pure zero
-left the network indifferent between stalling and losing, which is the
-documented run-#4 / run-#5 failure mode we're trying to break out of.
+Stalemate targets are produced by :class:`StalemateValueConfig` —
+default ``"vp_linear"`` (band ``[-0.5, -0.1]``, rank/VP combined). See
+:mod:`rl.stalemate_value` for the why behind moving off the constant
+``-0.25`` target after run #AZ-1 showed it collapsed the value loss.
 
 Known v1 warts (documented per project convention):
 
@@ -64,6 +63,7 @@ from rl.agents.policy_agent import PolicyAgent
 from rl.agents.search_agent import NetworkEvaluator
 from rl.encoding._action_layout import ACTION_SPACE_SIZE
 from rl.search.mcts import MCTSConfig, MCTSResult, run_mcts
+from rl.stalemate_value import StalemateValueConfig
 
 __all__ = [
     "SelfPlayConfig",
@@ -86,21 +86,25 @@ class SelfPlayConfig:
       moves (covers placements + early game), then ``T=0.0`` (argmax)
       thereafter. Training policy targets always use ``T=1.0``
       regardless; this schedule only shapes the sampled action.
-    * ``stalemate_value=-0.25`` — soft penalty on every seat for a
-      stalemate-terminated game. Not zero (pure AZ) and not −1 (loss
-      semantics); the documented middle ground that nudges the network
-      away from the stall attractor without sacrificing the
-      win-probability interpretation entirely.
+    * ``stalemate`` defaults to the ``vp_linear`` shape in
+      :class:`StalemateValueConfig`. Each seat's stalemate target lands
+      in ``[-0.5, -0.1]`` based on its rank and VP at the terminal
+      state, restoring variance in the value target distribution.
     * ``mcts.dirichlet_epsilon`` is **not** set here — the caller
       builds an ``MCTSConfig`` that turns Dirichlet on for self-play
       (typically ``epsilon=0.25``) and leaves it off for evaluation.
+
+    The same ``StalemateValueConfig`` instance should also live on
+    ``mcts.stalemate`` so MCTS's terminal backup matches the training
+    target. ``train_alphazero.py`` does this wiring at config-build
+    time.
     """
 
     mcts: MCTSConfig = field(default_factory=MCTSConfig)
     temperature_initial: float = 1.0
     temperature_final: float = 0.0
     temperature_threshold_moves: int = 30
-    stalemate_value: float = -0.25
+    stalemate: StalemateValueConfig = field(default_factory=StalemateValueConfig)
     max_moves: int = 1000
     player_ids: tuple[PlayerID, ...] = _DEFAULT_PLAYER_IDS
 
@@ -221,7 +225,7 @@ def play_self_play_game(
         state = engine.apply_action(state, chosen_action).state
         move_idx += 1
 
-    outcome = _terminal_outcome(state, n_players, config.stalemate_value)
+    outcome = _terminal_outcome(state, n_players, config.stalemate)
     winner_idx: Optional[int] = None
     if state.winner is not None:
         winner_idx = pids.index(state.winner)
@@ -360,16 +364,16 @@ def _mcts_target_distribution(
 
 
 def _terminal_outcome(
-    state, n_players: int, stalemate_value: float
+    state, n_players: int, stalemate: StalemateValueConfig
 ) -> np.ndarray:
     """Per-seat outcome vector in absolute seat order.
 
-    Winner = 1.0, losers = 0.0, stalemate = ``stalemate_value`` for all
-    seats. Non-terminal states (game truncated by ``max_moves``) count
-    as a stalemate by the same rule.
+    Winner case: ``1.0`` for the winner's slot, ``0.0`` elsewhere.
+    Stalemate (including ``max_moves`` truncation): ``stalemate.compute(...)``
+    — see :class:`StalemateValueConfig` for the shape.
     """
     if state.winner is None:
-        return np.full(n_players, stalemate_value, dtype=np.float32)
+        return stalemate.compute(state, n_players)
     out = np.zeros(n_players, dtype=np.float32)
     for i, pid in enumerate(state.config.player_ids):
         if pid == state.winner:

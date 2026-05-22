@@ -21,8 +21,10 @@ Design choices specific to Catan + Phase 3:
   single forward at the leaf gives the whole per-seat backup vector.
   The loss is direct MSE against the rotated value target stored on
   every :class:`rl.training.self_play.SelfPlayTransition`.
-* Stalemate target is the soft-penalty ``-0.25`` baked into
-  ``SelfPlayConfig.stalemate_value`` per the Phase 3 design memo.
+* Stalemate target is computed by :class:`StalemateValueConfig` on
+  ``SelfPlayConfig.stalemate`` (default ``"vp_linear"`` band
+  ``[-0.5, -0.1]``). The same instance lives on ``mcts.stalemate`` so
+  search backups match training targets.
 * The trainer is **continuous** (no promotion gate). Each iteration's
   network plays the next iteration's self-play; the prior-best
   comparison is purely informational. Promotion is left to az-008.
@@ -612,7 +614,7 @@ class AlphaZeroTrainer:
             f"- dirichlet (α, ε): ({mcts.dirichlet_alpha}, {mcts.dirichlet_epsilon})",
             f"- temperature schedule: T={sp.temperature_initial} for first "
             f"{sp.temperature_threshold_moves} moves, then T={sp.temperature_final}",
-            f"- stalemate value: {sp.stalemate_value}",
+            f"- stalemate: {_render_stalemate(sp.stalemate)}",
             f"- max moves: {sp.max_moves}",
             f"- lr: {self._cfg.lr}",
             f"- weight decay (L2): {self._cfg.weight_decay}",
@@ -673,6 +675,13 @@ def _fmt_pct(value: float | None) -> str:
     if value is None:
         return "-"
     return f"{value * 100:.0f}%"
+
+
+def _render_stalemate(stalemate) -> str:
+    """One-liner for the progress.md config block."""
+    if stalemate.shape == "flat":
+        return f"flat={stalemate.flat_value}"
+    return f"{stalemate.shape} [{stalemate.low}, {stalemate.high}]"
 
 
 def _render_iter_row(summary: dict[str, float]) -> str:

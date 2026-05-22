@@ -52,6 +52,7 @@ from domain.engine.randomizer import Randomizer
 from domain.game.state import GameState
 from domain.ids import PlayerID
 from rl.acting_player import acting_player
+from rl.stalemate_value import StalemateValueConfig
 
 __all__ = [
     "DICE_SUM_PMF",
@@ -125,6 +126,13 @@ class MCTSConfig:
       argmax suitable for late-game / evaluation play. ``run_mcts``
       itself always returns the argmax action; the caller decides
       whether to sample from :meth:`policy_distribution` instead.
+    * ``stalemate`` — :class:`StalemateValueConfig` controlling the
+      value vector backed up at a terminal stalemate leaf. **Must
+      match** whatever target the network was trained against (the
+      training pipeline shares its config instance here at run start).
+      The default is the zero-vector flat shape, preserving the
+      inference-time draw-is-zero behaviour for callers that don't
+      explicitly opt in.
     """
 
     rollouts: int = 100
@@ -133,6 +141,9 @@ class MCTSConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.0
     temperature: float = 1.0
+    stalemate: StalemateValueConfig = field(
+        default_factory=lambda: StalemateValueConfig(shape="flat", flat_value=0.0)
+    )
 
 
 @dataclass
@@ -278,7 +289,7 @@ def run_mcts(
     n_players = len(root_state.config.player_ids)
     rng = random.Random(config.seed)
 
-    root = _make_node(root_state, evaluator, engine, n_players)
+    root = _make_node(root_state, evaluator, engine, n_players, config.stalemate)
     if root.is_terminal:
         raise ValueError("run_mcts called on a terminal state")
     if not root.legal_actions:
@@ -339,7 +350,7 @@ def _simulate(
         edge_idx = _select_edge(node, config.c_puct)
         edge = node.edges[edge_idx]
         path.append((node, edge))
-        child = _descend(node, edge, engine, evaluator, rng)
+        child = _descend(node, edge, engine, evaluator, rng, config.stalemate)
         # New leaf? Expand and stop.
         if child.leaf_value.size == 0:
             # Not yet evaluated → expand now.
@@ -374,6 +385,7 @@ def _descend(
     engine: GameEngine,
     evaluator: Evaluator,
     rng: random.Random,
+    stalemate: StalemateValueConfig,
 ) -> _DecisionNode:
     """Resolve the child node we land on after taking ``edge`` from ``parent``.
 
@@ -391,7 +403,7 @@ def _descend(
                 engine, parent.state, edge.action, d1, d2
             )
             child = _make_node(
-                new_state, evaluator, engine, parent.n_players, lazy=True
+                new_state, evaluator, engine, parent.n_players, stalemate, lazy=True
             )
             edge.dice_children[sum_idx] = child
         return child
@@ -399,7 +411,7 @@ def _descend(
     if edge.child is None:
         new_state = engine.apply_action(parent.state, edge.action).state
         edge.child = _make_node(
-            new_state, evaluator, engine, parent.n_players, lazy=True
+            new_state, evaluator, engine, parent.n_players, stalemate, lazy=True
         )
     return edge.child
 
@@ -469,6 +481,7 @@ def _make_node(
     evaluator: Evaluator,
     engine: GameEngine,
     n_players: int,
+    stalemate: StalemateValueConfig,
     *,
     lazy: bool = False,
 ) -> _DecisionNode:
@@ -491,7 +504,7 @@ def _make_node(
             acting_seat_idx=seat_idx,
             is_terminal=True,
             n_players=n_players,
-            leaf_value=_terminal_value(state, n_players),
+            leaf_value=_terminal_value(state, n_players, stalemate),
         )
         return node
 
@@ -554,15 +567,19 @@ def _evaluate_leaf(node: _DecisionNode, evaluator: Evaluator) -> None:
     node.leaf_value = value_vec.astype(np.float64, copy=False)
 
 
-def _terminal_value(state: GameState, n_players: int) -> np.ndarray:
+def _terminal_value(
+    state: GameState, n_players: int, stalemate: StalemateValueConfig
+) -> np.ndarray:
     """Per-player value at a terminal state.
 
-    Winner gets 1.0; everyone else gets 0.0. Stalemate gets 0.0 for all
-    seats (no one wins) — same convention the sparse reward uses.
+    Winner gets ``1.0``; everyone else ``0.0``. Stalemate (no winner)
+    delegates to ``stalemate.compute(state, n_players)`` — must be the
+    same config the network was trained against, or MCTS Q values will
+    fight the value head's own predictions.
     """
-    out = np.zeros(n_players, dtype=np.float64)
     if state.winner is None:
-        return out
+        return stalemate.compute(state, n_players).astype(np.float64, copy=False)
+    out = np.zeros(n_players, dtype=np.float64)
     for i, pid in enumerate(state.config.player_ids):
         if pid == state.winner:
             out[i] = 1.0

@@ -53,6 +53,7 @@ from rl.evaluation.az_evaluator import AZEvalConfig, AZEvaluator
 from rl.evaluation.elo import EloTracker
 from rl.models.gnn import DEFAULT_GNN_ARCH, GNNPolicyValue
 from rl.search.mcts import MCTSConfig
+from rl.stalemate_value import StalemateValueConfig
 from rl.training.alphazero import AlphaZeroTrainer, AZTrainConfig
 from rl.training.checkpoint import load_checkpoint
 from rl.training.self_play import SelfPlayConfig
@@ -162,12 +163,39 @@ def build_parser() -> argparse.ArgumentParser:
         default=sp_defaults.temperature_threshold_moves,
         help="after this many moves, switch from initial to final temperature.",
     )
+    stale_defaults = StalemateValueConfig()
     p.add_argument(
-        "--stalemate-value",
+        "--stalemate-shape",
+        choices=("flat", "vp_linear"),
+        default=stale_defaults.shape,
+        help="how to compute the per-seat stalemate value target. "
+             "'flat' uses --stalemate-flat-value for every seat (legacy "
+             "constant target). 'vp_linear' (default) maps each seat "
+             "into [--stalemate-low, --stalemate-high] by combining its "
+             "VP rank and absolute VP at game end — restores variance "
+             "in the value target distribution so the value loss "
+             "doesn't collapse onto a constant.",
+    )
+    p.add_argument(
+        "--stalemate-flat-value",
         type=float,
-        default=sp_defaults.stalemate_value,
-        help="per-seat value target for stalemate-terminated games "
-             "(default -0.25; soft penalty from Phase 3 design pass).",
+        default=stale_defaults.flat_value,
+        help="constant per-seat target when --stalemate-shape=flat "
+             "(default -0.25; the legacy Phase 3 design pass value).",
+    )
+    p.add_argument(
+        "--stalemate-low",
+        type=float,
+        default=stale_defaults.low,
+        help="worst-case target in the vp_linear band (default -0.5).",
+    )
+    p.add_argument(
+        "--stalemate-high",
+        type=float,
+        default=stale_defaults.high,
+        help="best-case (leader, high VP) target in the vp_linear band "
+             "(default -0.1). Must satisfy max(stalemate-high) < min(win=1.0) "
+             "so the policy still prefers actual wins.",
     )
     p.add_argument(
         "--max-moves",
@@ -239,7 +267,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="optional checkpoint to warm-start weights from; must be a "
-             "graph-encoder, vector-value-head checkpoint.",
+             "graph-encoder, vector-value-head checkpoint (i.e. another "
+             "AZ run).",
+    )
+    p.add_argument(
+        "--init-from-encoder",
+        type=Path,
+        default=None,
+        help="optional checkpoint to partially warm-start from: copies "
+             "encoder + policy-head weights only, re-initializes the "
+             "value head. Use this to seed an AZ run from a PPO-trained "
+             "scalar-head GNN checkpoint (e.g. run #5's final.pt) — the "
+             "encoder is the expensive part and worth carrying over, but "
+             "the value head's training target shape differs. Mutually "
+             "exclusive with --init-from.",
     )
     p.add_argument(
         "--output-dir",
@@ -257,6 +298,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _build_config(args: argparse.Namespace) -> AZTrainConfig:
+    # Single source of truth for the stalemate target — the same
+    # instance is plumbed into both MCTSConfig and SelfPlayConfig so the
+    # network's training target and MCTS's terminal backup are identical
+    # by construction.
+    stalemate = StalemateValueConfig(
+        shape=args.stalemate_shape,
+        flat_value=args.stalemate_flat_value,
+        low=args.stalemate_low,
+        high=args.stalemate_high,
+    )
     mcts = MCTSConfig(
         rollouts=args.mcts_rollouts,
         c_puct=args.mcts_cpuct,
@@ -264,13 +315,14 @@ def _build_config(args: argparse.Namespace) -> AZTrainConfig:
         dirichlet_alpha=args.dirichlet_alpha,
         dirichlet_epsilon=args.dirichlet_epsilon,
         temperature=1.0,  # policy_distribution uses an explicit T; this is a default.
+        stalemate=stalemate,
     )
     self_play = SelfPlayConfig(
         mcts=mcts,
         temperature_initial=args.temperature_initial,
         temperature_final=args.temperature_final,
         temperature_threshold_moves=args.temperature_threshold_moves,
-        stalemate_value=args.stalemate_value,
+        stalemate=stalemate,
         max_moves=args.max_moves,
         player_ids=_PLAYER_IDS,
     )
@@ -318,8 +370,10 @@ def _resolve_warm_start(
     """Load ``--init-from``, validate it's AZ-shaped, and return its agent.
 
     Refuses to warm-start across encoder kinds OR value-head kinds: a
-    flat or a scalar-head checkpoint can't seed an AZ run (state_dicts
-    don't line up).
+    flat or a scalar-head checkpoint can't seed an AZ run with this
+    path (state_dicts don't line up). For the scalar-head case, use
+    ``--init-from-encoder`` instead — it drops the value-head keys
+    so the destination keeps its freshly-initialized vector head.
     """
     if path is None:
         return None
@@ -337,9 +391,47 @@ def _resolve_warm_start(
         raise SystemExit(
             f"error: --init-from {path} has value_kind="
             f"{meta.model_arch.gnn_arch.value_kind!r}; AlphaZero training "
-            "requires a vector-value-head checkpoint."
+            "requires a vector-value-head checkpoint. Pass the same path "
+            "via --init-from-encoder to copy only encoder + policy-head "
+            "weights and re-initialize the value head."
         )
     return agent
+
+
+# Keys whose shape depends on ``value_kind`` and so are intentionally
+# dropped during the partial warm-start path.
+_VALUE_HEAD_STATE_KEYS: frozenset[str] = frozenset(
+    {"value_head.weight", "value_head.bias"}
+)
+
+
+def _resolve_partial_warm_start(
+    path: Path | None, device: torch.device
+) -> dict | None:
+    """Load ``--init-from-encoder`` and return the encoder+policy state-dict.
+
+    The source checkpoint must be a graph-encoder checkpoint; its
+    ``value_kind`` is irrelevant (the value head's weights are dropped
+    either way). Returns the filtered state-dict ready for
+    ``model.load_state_dict(sd, strict=False)``; the caller is
+    responsible for verifying that only the expected keys
+    (``_VALUE_HEAD_STATE_KEYS``) end up missing.
+    """
+    if path is None:
+        return None
+    if not path.is_file():
+        raise SystemExit(
+            f"error: --init-from-encoder path does not exist: {path}"
+        )
+    agent, meta = load_checkpoint(path, device=device)
+    if meta.model_arch.encoder_kind != "graph":
+        raise SystemExit(
+            f"error: --init-from-encoder {path} is encoder_kind="
+            f"{meta.model_arch.encoder_kind!r}; AlphaZero training "
+            "requires a graph-encoder checkpoint."
+        )
+    sd = agent.state_dict()
+    return {k: v for k, v in sd.items() if k not in _VALUE_HEAD_STATE_KEYS}
 
 
 def _config_to_jsonable(cfg: AZTrainConfig, args: argparse.Namespace) -> dict:
@@ -370,8 +462,13 @@ def _config_to_jsonable(cfg: AZTrainConfig, args: argparse.Namespace) -> dict:
             "temperature_initial": cfg.self_play.temperature_initial,
             "temperature_final": cfg.self_play.temperature_final,
             "temperature_threshold_moves": cfg.self_play.temperature_threshold_moves,
-            "stalemate_value": cfg.self_play.stalemate_value,
             "max_moves": cfg.self_play.max_moves,
+        },
+        "stalemate": {
+            "shape": cfg.self_play.stalemate.shape,
+            "flat_value": cfg.self_play.stalemate.flat_value,
+            "low": cfg.self_play.stalemate.low,
+            "high": cfg.self_play.stalemate.high,
         },
         "cli": {
             "device": args.device,
@@ -403,6 +500,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.init_from is not None and args.init_from_encoder is not None:
+        print(
+            "error: --init-from and --init-from-encoder are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
 
     output_dir = (
         args.output_dir
@@ -421,6 +524,33 @@ def main(argv: list[str] | None = None) -> int:
         # counter all restart from scratch by construction.
         learner.load_state_dict(warm.state_dict())
         print(f"[az] warm-started from {args.init_from}", flush=True)
+
+    partial_sd = _resolve_partial_warm_start(args.init_from_encoder, device)
+    if partial_sd is not None:
+        result = learner.model.load_state_dict(partial_sd, strict=False)
+        if result.unexpected_keys:
+            print(
+                f"error: --init-from-encoder source has unexpected keys "
+                f"not present in the destination model: "
+                f"{sorted(result.unexpected_keys)}",
+                file=sys.stderr,
+            )
+            return 2
+        extra_missing = set(result.missing_keys) - _VALUE_HEAD_STATE_KEYS
+        if extra_missing:
+            print(
+                f"error: --init-from-encoder source is missing keys "
+                f"beyond the value-head set: {sorted(extra_missing)}",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"[az] partially warm-started encoder + policy head from "
+            f"{args.init_from_encoder}; value head re-initialized "
+            f"({len(partial_sd)} tensors copied, "
+            f"{len(_VALUE_HEAD_STATE_KEYS)} re-initialized)",
+            flush=True,
+        )
 
     cfg = _build_config(args)
     (output_dir / "config.json").write_text(

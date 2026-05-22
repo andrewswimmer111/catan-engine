@@ -332,7 +332,10 @@ def test_progress_md_header_carries_run_config_and_status(tmp_path: Path) -> Non
     assert "**Iteration**: 1 / 10" in text
     # Config section names the knobs we'd want to check at a glance.
     assert f"mcts rollouts / move: {cfg.self_play.mcts.rollouts}" in text
-    assert f"stalemate value: {cfg.self_play.stalemate_value}" in text
+    # vp_linear is the default shape; both endpoints should show.
+    assert "stalemate: vp_linear" in text
+    assert str(cfg.self_play.stalemate.low) in text
+    assert str(cfg.self_play.stalemate.high) in text
     # The table has the row for iter 1.
     assert "| 1 |" in text
 

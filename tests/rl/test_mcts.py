@@ -39,6 +39,7 @@ from rl.search.mcts import (
     MCTSResult,
     run_mcts,
 )
+from rl.stalemate_value import StalemateValueConfig
 
 PLAYER_IDS = [PlayerID(i) for i in range(1, 5)]
 N_PLAYERS = len(PLAYER_IDS)
@@ -301,7 +302,7 @@ def test_dice_chance_outcomes_sampled_by_pmf():
     from rl.search.mcts import _simulate
 
     evaluator = _UniformEval()
-    root = _make_node(state, evaluator, engine, N_PLAYERS)
+    root = _make_node(state, evaluator, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     assert isinstance(root, _DecisionNode)
     assert len(root.edges) == 1
     import random as _rnd
@@ -352,6 +353,9 @@ def test_evaluator_called_once_per_expanded_node():
 # ----------------------------------------------------------------------
 
 
+_DEFAULT_FLAT_STALEMATE = StalemateValueConfig(shape="flat", flat_value=0.0)
+
+
 def test_terminal_value_is_winner_one_hot():
     """At a winning terminal state, the per-player value vector should be
     1.0 in the winner's slot and 0.0 elsewhere."""
@@ -363,13 +367,16 @@ def test_terminal_value_is_winner_one_hot():
     s = copy.deepcopy(state)
     s.winner = PLAYER_IDS[2]  # seat index 2
     s.phase = TurnPhase.GAME_OVER
-    v = _terminal_value(s, N_PLAYERS)
+    v = _terminal_value(s, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     expected = np.array([0.0, 0.0, 1.0, 0.0])
     np.testing.assert_array_equal(v, expected)
 
 
-def test_terminal_value_stalemate_is_zero_vector():
-    """At a stalemate (no winner), every seat sees value 0.0."""
+def test_terminal_value_stalemate_uses_config_flat_value():
+    """Stalemate backup honours ``StalemateValueConfig.flat_value`` —
+    the default (``0.0``) preserves the historical draw-is-zero
+    behaviour; AZ training passes a different config so MCTS backups
+    match the network's training targets."""
     from rl.search.mcts import _terminal_value
 
     state = _initial_state()
@@ -378,8 +385,12 @@ def test_terminal_value_stalemate_is_zero_vector():
     s = copy.deepcopy(state)
     s.winner = None
     s.phase = TurnPhase.STALEMATE
-    v = _terminal_value(s, N_PLAYERS)
+    v = _terminal_value(s, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     np.testing.assert_array_equal(v, np.zeros(N_PLAYERS))
+    v_neg = _terminal_value(
+        s, N_PLAYERS, StalemateValueConfig(shape="flat", flat_value=-0.5)
+    )
+    np.testing.assert_array_equal(v_neg, np.full(N_PLAYERS, -0.5))
 
 
 # ----------------------------------------------------------------------
@@ -412,7 +423,7 @@ def test_default_config_does_not_perturb_root_priors() -> None:
     from rl.search.mcts import _make_node
 
     ev = _ScriptedEval(prior_picker, value_picker)
-    root = _make_node(state, ev, engine, N_PLAYERS)
+    root = _make_node(state, ev, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     # With dirichlet_epsilon=0 there's no _apply_root_dirichlet_noise call;
     # verify the public run_mcts path preserves the visit-count argmax that
     # the spike would dominate without noise.
@@ -450,7 +461,7 @@ def test_dirichlet_noise_modifies_root_priors_when_enabled() -> None:
     ev = _ScriptedEval(prior_picker, value_picker)
     cfg = MCTSConfig(rollouts=5, seed=42, dirichlet_alpha=0.3, dirichlet_epsilon=0.5)
 
-    root_noisy = _make_node(state, ev, engine, N_PLAYERS)
+    root_noisy = _make_node(state, ev, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     pre_noise = [e.prior for e in root_noisy.edges]
     _apply_root_dirichlet_noise(
         root_noisy, cfg, np.random.default_rng(cfg.seed)
@@ -490,11 +501,11 @@ def test_dirichlet_noise_affects_only_root_edges() -> None:
     ev = _ScriptedEval(prior_picker, value_picker)
     cfg = MCTSConfig(rollouts=1, seed=7, dirichlet_alpha=0.3, dirichlet_epsilon=0.5)
 
-    root = _make_node(state, ev, engine, N_PLAYERS)
+    root = _make_node(state, ev, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     _apply_root_dirichlet_noise(root, cfg, np.random.default_rng(cfg.seed))
     # Build a separate child node off the same state; verify it gets the
     # unmodified prior (the noise helper is not applied to it).
-    child = _make_node(state, ev, engine, N_PLAYERS)
+    child = _make_node(state, ev, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     child_priors = [e.prior for e in child.edges]
     # Network's spike-at-index-0 prior survives in the child.
     assert child_priors[0] == 1.0
@@ -513,9 +524,9 @@ def test_dirichlet_noise_determinism_under_fixed_seed() -> None:
     ev = _UniformEval()
     cfg = MCTSConfig(rollouts=1, seed=99, dirichlet_epsilon=0.4)
 
-    r1 = _make_node(state, ev, engine, N_PLAYERS)
+    r1 = _make_node(state, ev, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     _apply_root_dirichlet_noise(r1, cfg, np.random.default_rng(cfg.seed))
-    r2 = _make_node(state, ev, engine, N_PLAYERS)
+    r2 = _make_node(state, ev, engine, N_PLAYERS, _DEFAULT_FLAT_STALEMATE)
     _apply_root_dirichlet_noise(r2, cfg, np.random.default_rng(cfg.seed))
 
     p1 = [e.prior for e in r1.edges]
