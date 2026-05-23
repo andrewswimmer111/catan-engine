@@ -652,7 +652,7 @@ class AlphaZeroTrainer:
         lines += ["", "## Iterations", ""]
         cols = [
             "iter", "wall", "stale%", "moves/game",
-            "pol_loss", "val_loss",
+            "pol_loss", "val_loss", "aux_loss",
             "vs_rand", "vs_heur", "vs_prior",
             "buffer",
         ]
@@ -724,6 +724,7 @@ def _render_iter_row(summary: dict[str, float]) -> str:
         f"{float(summary.get('self_play/mean_moves_per_game', 0.0)):.0f}",
         f"{float(summary.get('train/policy_loss', 0.0)):.3f}",
         f"{float(summary.get('train/value_loss', 0.0)):.3f}",
+        f"{float(summary.get('train/aux_value_loss', 0.0)):.3f}",
         _fmt_pct(_get("eval/vs_random/win_rate")),
         _fmt_pct(_get("eval/vs_heuristic/win_rate")),
         _fmt_pct(_get("eval/vs_prior_snapshot/win_rate")),
