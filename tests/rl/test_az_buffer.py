@@ -34,6 +34,7 @@ def _make_transition(tag: float) -> SelfPlayTransition:
         mcts_policy=np.zeros(ACTION_SPACE_SIZE, dtype=np.float32),
         acting_seat_idx=int(tag) % _N_PLAYERS,
         value_target=np.full(_N_PLAYERS, tag, dtype=np.float32),
+        vp_aux_target=np.full(_N_PLAYERS, tag, dtype=np.float32),
     )
 
 
@@ -104,6 +105,7 @@ def test_sample_returns_stacked_batch_of_requested_size() -> None:
     assert batch.action_mask.shape == (5, ACTION_SPACE_SIZE)
     assert batch.policy_target.shape == (5, ACTION_SPACE_SIZE)
     assert batch.value_target.shape == (5, _N_PLAYERS)
+    assert batch.vp_aux_target.shape == (5, _N_PLAYERS)
     assert batch.obs.dtype == np.float32
     assert batch.action_mask.dtype == bool
 

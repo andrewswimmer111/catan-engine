@@ -45,6 +45,7 @@ from rl.training.self_play import (  # noqa: E402  pull internals for unit tests
     _rotate_to_acting_seat,
     _temperature_for,
     _terminal_outcome,
+    _vp_aux_target,
 )
 
 
@@ -189,6 +190,46 @@ def test_stalemate_config_rejects_inverted_band() -> None:
 def test_stalemate_config_rejects_unknown_shape() -> None:
     with pytest.raises(ValueError, match="unknown stalemate shape"):
         StalemateValueConfig(shape="rank_only")  # type: ignore[arg-type]
+
+
+# ----------------------------------------------------------------------
+# VP-aux target — rotation arithmetic + normalisation
+# ----------------------------------------------------------------------
+
+
+def test_vp_aux_target_uses_real_engine_state_with_zero_vp() -> None:
+    """At a fresh post-setup state every seat has 2 settlement VP from
+    the initial-placement phase. The aux target is VP/10 rotated to
+    acting-as-slot-0; with everyone tied, every slot is 0.2."""
+    from tests.fixtures.states import post_setup_state
+
+    s = post_setup_state(seed=0, n_players=4)
+    pids = list(s.config.player_ids)
+    out = _vp_aux_target(s, pids, acting_seat_idx=2)
+    np.testing.assert_allclose(out, np.full(N_PLAYERS, 0.2), atol=1e-6)
+    assert out.dtype == np.float32
+
+
+def test_vp_aux_target_rotates_acting_seat_to_slot_zero() -> None:
+    """Seat 0 has 5 VP, seat 1 has 3, seat 2 has 2, seat 3 has 1 (built
+    via the fixture state, then forced via raw counters). Aux target
+    for acting_seat=1 must put seat 1 (3 VP → 0.3) in slot 0, seat 2
+    in slot 1, ... seat 0 in slot 3."""
+    from tests.fixtures.states import post_setup_state
+
+    s = post_setup_state(seed=0, n_players=4)
+    pids = list(s.config.player_ids)
+    # Force a non-uniform VP layout. Bypass the engine and set raw
+    # counters — the aux target reads through compute_victory_points
+    # which sums settlements + 2×cities + dev VP + special awards.
+    s.players[pids[0]].settlements_built = 5
+    s.players[pids[1]].settlements_built = 3
+    s.players[pids[2]].settlements_built = 2
+    s.players[pids[3]].settlements_built = 1
+    out = _vp_aux_target(s, pids, acting_seat_idx=1)
+    # Absolute-seat VP (after /10): [0.5, 0.3, 0.2, 0.1]
+    # Rotated so seat 1 lands at slot 0: [0.3, 0.2, 0.1, 0.5]
+    np.testing.assert_allclose(out, [0.3, 0.2, 0.1, 0.5], atol=1e-6)
 
 
 # ----------------------------------------------------------------------

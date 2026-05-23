@@ -102,6 +102,17 @@ class AZTrainConfig:
     lr: float = 3e-4
     weight_decay: float = 1e-4
     value_coef: float = 1.0
+    aux_value_coef: float = 0.0
+    """Coefficient on the per-step VP auxiliary value loss.
+
+    When > 0, the trainer adds
+    ``aux_value_coef * MSE(value_pred, batch.vp_aux_target)`` to the
+    total loss. The aux target is each seat's VP / 10 at the
+    transition's state, rotated to acting-as-slot-0 (same layout as
+    ``value_target``). Use ~0.1-0.5 to break the cold-bootstrap loop
+    where the value head never observes a real win (run #AZ-1's and
+    #011 pilot's failure mode); 0.0 (default) reproduces canonical AZ.
+    """
     batch_size: int = 128
     batches_per_iter: int = 100
     max_grad_norm: float = 5.0
@@ -397,6 +408,9 @@ class AlphaZeroTrainer:
         value_target_t = torch.as_tensor(
             batch.value_target, dtype=torch.float32, device=self._device
         )
+        vp_aux_target_t = torch.as_tensor(
+            batch.vp_aux_target, dtype=torch.float32, device=self._device
+        )
 
         out = self._learner.model(obs_t, mask_t)
         # Policy CE = -sum(pi_target * log pi_model). The model's forward
@@ -411,8 +425,18 @@ class AlphaZeroTrainer:
 
         # Value MSE over the per-seat vector; mean over batch and seats.
         value_loss = (out.value - value_target_t).pow(2).mean()
+        # Per-step VP auxiliary: MSE between the value head and the
+        # rotated VP-normalised vector at the current state. Mixed in
+        # at coefficient ``aux_value_coef`` (default 0; non-zero
+        # required to break the cold-bootstrap where the value head
+        # never observes terminal wins).
+        aux_value_loss = (out.value - vp_aux_target_t).pow(2).mean()
 
-        loss = policy_loss + self._cfg.value_coef * value_loss
+        loss = (
+            policy_loss
+            + self._cfg.value_coef * value_loss
+            + self._cfg.aux_value_coef * aux_value_loss
+        )
 
         self._optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -424,6 +448,7 @@ class AlphaZeroTrainer:
         return {
             "policy_loss": float(policy_loss.item()),
             "value_loss": float(value_loss.item()),
+            "aux_value_loss": float(aux_value_loss.item()),
             "total_loss": float(loss.item()),
             "grad_norm": float(grad_norm.item()),
         }
@@ -619,6 +644,7 @@ class AlphaZeroTrainer:
             f"- lr: {self._cfg.lr}",
             f"- weight decay (L2): {self._cfg.weight_decay}",
             f"- value coef: {self._cfg.value_coef}",
+            f"- aux value coef (per-step VP): {self._cfg.aux_value_coef}",
             f"- eval / snapshot cadence (iters): "
             f"{self._cfg.eval_every_iters} / {self._cfg.snapshot_every_iters}",
         ]
@@ -647,6 +673,7 @@ def _zero_update_metrics() -> dict[str, float]:
     return {
         "policy_loss": 0.0,
         "value_loss": 0.0,
+        "aux_value_loss": 0.0,
         "total_loss": 0.0,
         "grad_norm": 0.0,
     }

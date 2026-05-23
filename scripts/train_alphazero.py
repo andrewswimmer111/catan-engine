@@ -111,6 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="loss weight on the per-seat value MSE term.",
     )
     p.add_argument(
+        "--aux-value-coef",
+        type=float,
+        default=AZTrainConfig.__dataclass_fields__["aux_value_coef"].default,
+        help="loss weight on the per-step VP auxiliary value MSE term. "
+             "0.0 (default) = canonical AZ. Non-zero (try 0.1-0.5) "
+             "bridges the cold-bootstrap loop where the value head "
+             "never observes terminal wins by regressing it against "
+             "current VP / 10 at every state.",
+    )
+    p.add_argument(
         "--batch-size",
         type=int,
         default=AZTrainConfig.__dataclass_fields__["batch_size"].default,
@@ -333,6 +343,7 @@ def _build_config(args: argparse.Namespace) -> AZTrainConfig:
         lr=args.lr,
         weight_decay=args.weight_decay,
         value_coef=args.value_coef,
+        aux_value_coef=args.aux_value_coef,
         batch_size=args.batch_size,
         batches_per_iter=args.batches_per_iter,
         max_grad_norm=args.max_grad_norm,
@@ -443,6 +454,7 @@ def _config_to_jsonable(cfg: AZTrainConfig, args: argparse.Namespace) -> dict:
             "lr": cfg.lr,
             "weight_decay": cfg.weight_decay,
             "value_coef": cfg.value_coef,
+            "aux_value_coef": cfg.aux_value_coef,
             "batch_size": cfg.batch_size,
             "batches_per_iter": cfg.batches_per_iter,
             "max_grad_norm": cfg.max_grad_norm,

@@ -52,12 +52,18 @@ class AZBatch:
     * ``value_target`` — ``(B, n_players)``, viewer-as-slot-0 (the same
       convention :class:`rl.models.gnn.GNNPolicyValue` outputs in
       ``value_kind="vector"`` mode, so the value loss is direct MSE).
+    * ``vp_aux_target`` — ``(B, n_players)``, same rotation as
+      ``value_target``. Per-state VP / 10. Consumed by the optional
+      per-step auxiliary value loss
+      (:attr:`AZTrainConfig.aux_value_coef`); always stacked even if
+      the coefficient is 0 so the buffer's shape is config-independent.
     """
 
     obs: np.ndarray
     action_mask: np.ndarray
     policy_target: np.ndarray
     value_target: np.ndarray
+    vp_aux_target: np.ndarray
 
 
 class AZReplayBuffer:
@@ -134,9 +140,11 @@ def _stack_transitions(transitions: list[SelfPlayTransition]) -> AZBatch:
     masks = np.stack([t.action_mask for t in transitions])
     policy = np.stack([t.mcts_policy for t in transitions])
     value = np.stack([t.value_target for t in transitions])
+    vp_aux = np.stack([t.vp_aux_target for t in transitions])
     return AZBatch(
         obs=obs,
         action_mask=masks,
         policy_target=policy,
         value_target=value,
+        vp_aux_target=vp_aux,
     )

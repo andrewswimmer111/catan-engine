@@ -58,6 +58,7 @@ from domain.engine.randomizer import SeededRandomizer
 from domain.enums import EndReason
 from domain.game.config import GameConfig
 from domain.ids import PlayerID
+from domain.rules.victory import compute_victory_points
 from rl.acting_player import acting_player
 from rl.agents.policy_agent import PolicyAgent
 from rl.agents.search_agent import NetworkEvaluator
@@ -142,6 +143,19 @@ class SelfPlayTransition:
     the value loss is a direct MSE against this vector.
     """
 
+    vp_aux_target: np.ndarray
+    """Per-seat VP at the *current state*, normalised by the 10-VP win
+    threshold and rotated to acting-seat-as-slot-0; shape ``(n_players,)``.
+
+    Used by the optional per-step VP auxiliary value loss
+    (:attr:`AZTrainConfig.aux_value_coef` > 0): the value head is also
+    regressed against this vector with a small coefficient so it
+    learns that high VP is intrinsically valuable, independent of
+    whether the bootstrap loop has yet observed terminal wins. Set
+    coefficient to 0 to ignore the field entirely (it's still
+    populated; the cost is negligible).
+    """
+
 
 @dataclass(frozen=True)
 class SelfPlayGame:
@@ -195,6 +209,11 @@ def play_self_play_game(
         acting_idx = pids.index(acting_pid)
         obs = obs_encoder.encode(make_player_view(state, acting_pid))
         mask = action_encoder.mask(legal)
+        # Per-state VP snapshot (rotated to acting-as-slot-0). Cheap to
+        # compute (engine traversal over 4 seats) and the only way the
+        # value head can get win-shaped signal in regimes where games
+        # don't naturally terminate in a winner.
+        vp_aux = _vp_aux_target(state, pids, acting_idx)
 
         chosen_action, policy_target = _decide_move(
             state=state,
@@ -220,6 +239,7 @@ def play_self_play_game(
                 action_mask=mask,
                 mcts_policy=policy_target,
                 acting_seat_idx=acting_idx,
+                vp_aux_target=vp_aux,
             )
         )
         state = engine.apply_action(state, chosen_action).state
@@ -237,6 +257,7 @@ def play_self_play_game(
             mcts_policy=p.mcts_policy,
             acting_seat_idx=p.acting_seat_idx,
             value_target=_rotate_to_acting_seat(outcome, p.acting_seat_idx),
+            vp_aux_target=p.vp_aux_target,
         )
         for p in pending
     )
@@ -261,6 +282,7 @@ class _PendingTransition:
     action_mask: np.ndarray
     mcts_policy: np.ndarray
     acting_seat_idx: int
+    vp_aux_target: np.ndarray
 
 
 def _decide_move(
@@ -379,6 +401,26 @@ def _terminal_outcome(
         if pid == state.winner:
             out[i] = 1.0
     return out
+
+
+def _vp_aux_target(
+    state, pids: list[PlayerID], acting_seat_idx: int
+) -> np.ndarray:
+    """Per-seat VP / 10 at ``state``, rotated to acting-as-slot-0.
+
+    Range per slot: ``[0.0, 0.9]`` for non-terminal states (any seat at
+    10 VP would have triggered :func:`check_winner` and ended the
+    game). Normalisation matches the win value target (``+1.0`` for a
+    real winner) so the auxiliary loss and the terminal loss live on
+    the same scale.
+    """
+    raw = np.fromiter(
+        (compute_victory_points(state, pid) for pid in pids),
+        dtype=np.float32,
+        count=len(pids),
+    )
+    raw /= 10.0
+    return np.roll(raw, -acting_seat_idx).astype(np.float32, copy=False)
 
 
 def _rotate_to_acting_seat(

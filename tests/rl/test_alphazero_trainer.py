@@ -16,6 +16,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import dataclasses
 import random
 from pathlib import Path
 
@@ -153,8 +154,13 @@ def _handcrafted_batch(batch_size: int = 4) -> AZBatch:
     target[:, 0] = 0.7
     target[:, 1] = 0.3
     value = np.zeros((batch_size, N_PLAYERS), dtype=np.float32)
+    vp_aux = np.zeros((batch_size, N_PLAYERS), dtype=np.float32)
     return AZBatch(
-        obs=obs, action_mask=mask, policy_target=target, value_target=value
+        obs=obs,
+        action_mask=mask,
+        policy_target=target,
+        value_target=value,
+        vp_aux_target=vp_aux,
     )
 
 
@@ -168,6 +174,42 @@ def test_train_step_emits_finite_metrics() -> None:
     # Policy CE is non-negative; value MSE is non-negative.
     assert metrics["policy_loss"] >= 0.0
     assert metrics["value_loss"] >= 0.0
+
+
+def test_train_step_aux_value_loss_is_zero_when_coef_is_zero() -> None:
+    """The default ``aux_value_coef=0`` reproduces canonical AZ: the
+    aux MSE is still computed and reported, but its contribution to
+    ``total_loss`` must be exactly zero (no gradient signal). Pin this
+    so a future refactor that, say, computes a sum instead of a coefed
+    add doesn't silently change behaviour for the canonical configs."""
+    learner = _make_vector_policy(seed=8)
+    cfg = _tiny_az_config()
+    assert cfg.aux_value_coef == 0.0
+    trainer = AlphaZeroTrainer(learner, cfg)
+    metrics = trainer._train_step(_handcrafted_batch(batch_size=4))
+    expected_total = (
+        metrics["policy_loss"] + cfg.value_coef * metrics["value_loss"]
+    )
+    assert metrics["total_loss"] == pytest.approx(expected_total, rel=1e-5)
+
+
+def test_train_step_aux_value_loss_contributes_when_coef_positive() -> None:
+    """With a non-zero ``aux_value_coef``, the aux MSE must show up in
+    ``total_loss`` (otherwise the knob is dead). The handcrafted batch
+    has ``vp_aux_target`` all zeros, so the aux MSE equals
+    ``mean(value_pred ** 2)`` — a non-zero scalar from any non-zero
+    value head, which a fresh network will have."""
+    learner = _make_vector_policy(seed=9)
+    cfg = dataclasses.replace(_tiny_az_config(), aux_value_coef=0.5)
+    trainer = AlphaZeroTrainer(learner, cfg)
+    metrics = trainer._train_step(_handcrafted_batch(batch_size=4))
+    assert metrics["aux_value_loss"] > 0.0
+    expected_total = (
+        metrics["policy_loss"]
+        + cfg.value_coef * metrics["value_loss"]
+        + cfg.aux_value_coef * metrics["aux_value_loss"]
+    )
+    assert metrics["total_loss"] == pytest.approx(expected_total, rel=1e-5)
 
 
 def test_train_step_handles_illegal_action_masking() -> None:
