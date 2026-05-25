@@ -113,6 +113,16 @@ def test_parser_overrides_propagate() -> None:
     assert cfg.snapshot_every_iters == 0
 
 
+def test_parser_win_vp_propagates_to_self_play_config() -> None:
+    """``--win-vp`` lands on ``SelfPlayConfig.victory_point_target``
+    so the engine's GameConfig actually uses the curriculum threshold."""
+    args = train_alphazero.build_parser().parse_args(
+        ["--total-iters", "1", "--win-vp", "6"]
+    )
+    cfg = train_alphazero._build_config(args)
+    assert cfg.self_play.victory_point_target == 6
+
+
 def test_parser_vp_linear_band_overrides_propagate() -> None:
     """The vp_linear band knobs must reach SelfPlayConfig + MCTSConfig
     via the shared StalemateValueConfig instance."""

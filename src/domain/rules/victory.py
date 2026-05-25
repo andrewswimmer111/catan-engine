@@ -30,14 +30,17 @@ def compute_victory_points(state: GameState, player_id: PlayerID) -> int:
 
 def check_winner(state: GameState) -> PlayerID | None:
     """
-    Return the winner only if the *current* player has reached 10+ VP.
+    Return the winner only if the *current* player has reached the
+    configured VP target (``state.config.victory_point_target``;
+    defaults to 10 — standard Catan rules).
 
     A player can only declare victory on their own turn — hidden VP dev cards
     are only revealed then, and the rules forbid winning on someone else's
-    turn even if a special-award transfer pushes a non-active player to 10.
+    turn even if a special-award transfer pushes a non-active player to the
+    threshold.
     """
     pid = state.current_player
-    if compute_victory_points(state, pid) >= 10:
+    if compute_victory_points(state, pid) >= state.config.victory_point_target:
         return pid
     return None
 

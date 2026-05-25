@@ -651,6 +651,7 @@ class AlphaZeroTrainer:
             f"{sp.temperature_threshold_moves} moves, then T={sp.temperature_final}",
             f"- stalemate: {_render_stalemate(sp.stalemate)}",
             f"- max moves: {sp.max_moves}",
+            f"- win VP: {sp.victory_point_target}",
             f"- lr: {self._cfg.lr}",
             f"- weight decay (L2): {self._cfg.weight_decay}",
             f"- value coef: {self._cfg.value_coef}",

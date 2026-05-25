@@ -193,6 +193,37 @@ def test_stalemate_config_rejects_unknown_shape() -> None:
 
 
 # ----------------------------------------------------------------------
+# SelfPlayConfig.victory_point_target → GameConfig propagation
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_self_play_uses_curriculum_vp_target_from_config() -> None:
+    """The VP target on ``SelfPlayConfig`` must reach the engine's
+    :class:`GameConfig` so games actually end at the lower threshold.
+    Regression guard: a missing pass-through here is the difference
+    between "curriculum bootstraps the value head" and "curriculum
+    silently runs at 10 VP and behaves like the canonical regime."
+    """
+    network = _make_tiny_policy(seed=99)
+    cfg = SelfPlayConfig(
+        mcts=MCTSConfig(rollouts=2, c_puct=2.0, seed=0),
+        temperature_threshold_moves=2,
+        max_moves=200,
+        victory_point_target=4,  # absurdly low — guarantees an early win
+        stalemate=_FLAT_ZERO,
+    )
+    game = play_self_play_game(network, cfg, random.Random(0), game_seed=7)
+    # With victory_point_target=4, a player just needs 2 more VP beyond
+    # the initial 2-settlement placement to win. Any tiny GNN should
+    # produce a winner well within max_moves=200.
+    assert game.winner_seat_idx is not None, (
+        "expected a real winner at victory_point_target=4; "
+        f"got stalemate (n_moves={game.n_moves}, end_reason={game.end_reason})"
+    )
+
+
+# ----------------------------------------------------------------------
 # VP-aux target — rotation arithmetic + normalisation
 # ----------------------------------------------------------------------
 

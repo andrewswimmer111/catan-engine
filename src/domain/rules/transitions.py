@@ -67,8 +67,9 @@ def _no_progress_possible(state: GameState) -> bool:
     """
     if state.winner is not None:
         return False
+    vp_target = state.config.victory_point_target
     if any(
-        victory.compute_victory_points(state, p) >= 10
+        victory.compute_victory_points(state, p) >= vp_target
         for p in state.config.player_ids
     ):
         return False

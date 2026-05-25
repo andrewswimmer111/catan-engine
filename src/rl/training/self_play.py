@@ -107,6 +107,17 @@ class SelfPlayConfig:
     temperature_threshold_moves: int = 30
     stalemate: StalemateValueConfig = field(default_factory=StalemateValueConfig)
     max_moves: int = 1000
+    victory_point_target: int = 10
+    """VP target plumbed into the per-game :class:`GameConfig`.
+
+    Defaults to ``10`` (standard Catan). Lower values are the
+    curriculum knob for breaking the cold-bootstrap loop: at
+    ``victory_point_target=6`` games actually terminate in real
+    winners, the value head sees ``+1.0`` targets, and policy
+    iteration has tactical Q-differentiation to learn from. Bump
+    upward (6 → 7 → 8 → 10) across runs once the policy can
+    reliably win at the current threshold.
+    """
     player_ids: tuple[PlayerID, ...] = _DEFAULT_PLAYER_IDS
 
 
@@ -191,7 +202,13 @@ def play_self_play_game(
     pids = list(config.player_ids)
     n_players = len(pids)
     engine = GameEngine(SeededRandomizer(game_seed))
-    state = engine.new_game(GameConfig(player_ids=pids, seed=game_seed))
+    state = engine.new_game(
+        GameConfig(
+            player_ids=pids,
+            seed=game_seed,
+            victory_point_target=config.victory_point_target,
+        )
+    )
 
     network.model.eval()
     evaluator = NetworkEvaluator(network)

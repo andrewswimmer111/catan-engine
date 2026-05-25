@@ -26,6 +26,35 @@ def test_game_config_rejects_invalid_player_count() -> None:
         GameConfig(player_ids=[PlayerID(0), PlayerID(1)], seed=0)
 
 
+def test_game_config_defaults_to_standard_ten_vp_target() -> None:
+    """Existing call sites that didn't pass ``victory_point_target``
+    must keep getting the standard Catan 10 VP threshold."""
+    cfg = GameConfig(player_ids=[PlayerID(i) for i in range(4)], seed=0)
+    assert cfg.victory_point_target == 10
+
+
+def test_game_config_accepts_lower_vp_target_for_curriculum() -> None:
+    """Curriculum training uses lower targets (e.g. 6) so games actually
+    terminate in real wins; the constructor must accept them."""
+    cfg = GameConfig(
+        player_ids=[PlayerID(i) for i in range(4)],
+        seed=0,
+        victory_point_target=6,
+    )
+    assert cfg.victory_point_target == 6
+
+
+def test_game_config_rejects_vp_target_below_two() -> None:
+    """A 2-seat initial-placement already yields 2 VP per player —
+    any target < 2 would award the win at the first check. Refuse it."""
+    with pytest.raises(ValueError, match="victory_point_target"):
+        GameConfig(
+            player_ids=[PlayerID(i) for i in range(4)],
+            seed=0,
+            victory_point_target=1,
+        )
+
+
 def test_bank_starts_at_19_per_tradeable_resource() -> None:
     from domain.enums import tradeable_resources
     b = Bank()

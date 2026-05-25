@@ -43,8 +43,12 @@ _DEFAULT_PLAYER_IDS = [PlayerID(i) for i in range(1, 5)]
 ActionInput = Union[int, np.integer, Action]
 
 
-def _default_config(seed: int) -> GameConfig:
-    return GameConfig(player_ids=list(_DEFAULT_PLAYER_IDS), seed=seed)
+def _default_config(seed: int, victory_point_target: int = 10) -> GameConfig:
+    return GameConfig(
+        player_ids=list(_DEFAULT_PLAYER_IDS),
+        seed=seed,
+        victory_point_target=victory_point_target,
+    )
 
 
 class CatanEnv:
@@ -57,11 +61,15 @@ class CatanEnv:
         obs_encoder: ObservationEncoder | None = None,
         action_encoder: ActionEncoder | None = None,
         reward_fn: RewardFn | None = None,
+        victory_point_target: int = 10,
     ) -> None:
         self._base_config = config
         self._seed: int = seed if seed is not None else 0
+        self._victory_point_target = victory_point_target
         self._engine = GameEngine(SeededRandomizer(self._seed))
-        cfg = self._base_config or _default_config(self._seed)
+        cfg = self._base_config or _default_config(
+            self._seed, victory_point_target=victory_point_target
+        )
         self._state: GameState = self._engine.new_game(cfg)
         self._last_events: list[GameEvent] = []
 
@@ -98,7 +106,9 @@ class CatanEnv:
         if seed is not None:
             self._seed = seed
         self._engine = GameEngine(SeededRandomizer(self._seed))
-        cfg = self._base_config or _default_config(self._seed)
+        cfg = self._base_config or _default_config(
+            self._seed, victory_point_target=self._victory_point_target
+        )
         self._state = self._engine.new_game(cfg)
         self._last_events = []
         self._legal_cache = None

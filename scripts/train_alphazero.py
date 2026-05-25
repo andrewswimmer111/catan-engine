@@ -213,6 +213,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=sp_defaults.max_moves,
         help="hard cap on per-self-play-game moves; truncates as stalemate",
     )
+    p.add_argument(
+        "--win-vp",
+        type=int,
+        default=sp_defaults.victory_point_target,
+        help="victory-point threshold for ending a game in a real win "
+             "(default 10 — standard Catan). Lower (e.g. 6) is the "
+             "curriculum knob for breaking the AZ chicken-and-egg loop "
+             "where no agent reaches 10 VP and the value head never sees "
+             "a +1 win target. Applies to both self-play games and the "
+             "anchor-eval games so the eval signal tracks training.",
+    )
 
     # Cadence.
     p.add_argument(
@@ -334,6 +345,7 @@ def _build_config(args: argparse.Namespace) -> AZTrainConfig:
         temperature_threshold_moves=args.temperature_threshold_moves,
         stalemate=stalemate,
         max_moves=args.max_moves,
+        victory_point_target=args.win_vp,
         player_ids=_PLAYER_IDS,
     )
     return AZTrainConfig(
@@ -475,6 +487,7 @@ def _config_to_jsonable(cfg: AZTrainConfig, args: argparse.Namespace) -> dict:
             "temperature_final": cfg.self_play.temperature_final,
             "temperature_threshold_moves": cfg.self_play.temperature_threshold_moves,
             "max_moves": cfg.self_play.max_moves,
+            "victory_point_target": cfg.self_play.victory_point_target,
         },
         "stalemate": {
             "shape": cfg.self_play.stalemate.shape,
@@ -490,11 +503,22 @@ def _config_to_jsonable(cfg: AZTrainConfig, args: argparse.Namespace) -> dict:
     }
 
 
-def _env_factory_for(learner: PolicyAgent):
-    """Build a seed→CatanEnv factory wired to the learner's obs encoder."""
+def _env_factory_for(learner: PolicyAgent, victory_point_target: int = 10):
+    """Build a seed→CatanEnv factory wired to the learner's obs encoder.
+
+    ``victory_point_target`` is plumbed into the env's :class:`GameConfig`
+    so anchor evaluations (vs random, vs heuristic, vs prior snapshot)
+    play at the same win threshold as self-play. Without this, a
+    curriculum run at ``--win-vp 6`` would self-play at 6 VP but
+    eval-game at 10 VP, scrambling the win-rate signal.
+    """
 
     def factory(seed: int) -> CatanEnv:
-        return CatanEnv(seed=seed, obs_encoder=learner.obs_encoder)
+        return CatanEnv(
+            seed=seed,
+            obs_encoder=learner.obs_encoder,
+            victory_point_target=victory_point_target,
+        )
 
     return factory
 
@@ -580,7 +604,9 @@ def main(argv: list[str] | None = None) -> int:
     # Build the AZ evaluator once so the trainer's logger is shared with
     # the evaluator's TB scalars (single SummaryWriter, single TB log dir).
     logger = make_logger(log_dir)
-    env_factory = _env_factory_for(learner)
+    env_factory = _env_factory_for(
+        learner, victory_point_target=args.win_vp
+    )
     eval_cfg = AZEvalConfig(
         every_iters=cfg.eval_every_iters,
         n_games=cfg.eval_games,

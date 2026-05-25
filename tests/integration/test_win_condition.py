@@ -47,6 +47,29 @@ def test_victory_point_dev_cards_in_hand_add_to_stated_victory_total() -> None:
     assert victory.compute_victory_points(s, PlayerID(0)) == 5
 
 
+def test_check_winner_honours_lower_curriculum_vp_target() -> None:
+    """The curriculum knob lowers the win threshold (e.g. 6 VP).
+    At 5 VP under a target=6 config, no one wins; at 6, the current
+    player wins."""
+    s = post_setup_state(0, 4)
+    s = copy.deepcopy(s)
+    # Build a config with a 6 VP target via dataclasses.replace — keep
+    # everything else (player_ids, seed, board_variant) the same.
+    import dataclasses
+
+    s.config = dataclasses.replace(s.config, victory_point_target=6)
+    s.current_player = PlayerID(0)
+    p0 = s.players[PlayerID(0)]
+    p0.settlements_built = 0
+    p0.cities_built = 0
+    # 5 hidden VP dev cards → 5 VP, under the 6-VP target.
+    p0.dev_cards_in_hand = [(DevCardType.VICTORY_POINT, 0)] * 5
+    assert victory.check_winner(s) is None
+    # 6 cards → 6 VP, meets the curriculum target.
+    p0.dev_cards_in_hand = [(DevCardType.VICTORY_POINT, 0)] * 6
+    assert victory.check_winner(s) == PlayerID(0)
+
+
 def test_largest_army_and_longest_road_add_two_each_to_victory() -> None:
     s: GameState = post_setup_state(0, 4)
     s = copy.deepcopy(s)
