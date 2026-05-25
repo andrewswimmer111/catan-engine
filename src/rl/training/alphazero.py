@@ -445,10 +445,20 @@ class AlphaZeroTrainer:
         )
         self._optimizer.step()
 
+        # Diagnostic: std of value_pred across the batch tells us
+        # whether the value head is differentiating states (good) or
+        # collapsing to a near-constant (the #012 pilot failure mode
+        # where the aux loss got drowned out by the terminal stalemate
+        # signal). MCTS Q-differentiation is impossible when this is
+        # near zero, so it's the canonical metric to watch when the
+        # aux-value coef knob is exercised.
+        value_pred_std = float(out.value.detach().std().item())
+
         return {
             "policy_loss": float(policy_loss.item()),
             "value_loss": float(value_loss.item()),
             "aux_value_loss": float(aux_value_loss.item()),
+            "value_pred_std": value_pred_std,
             "total_loss": float(loss.item()),
             "grad_norm": float(grad_norm.item()),
         }
@@ -652,7 +662,7 @@ class AlphaZeroTrainer:
         lines += ["", "## Iterations", ""]
         cols = [
             "iter", "wall", "stale%", "moves/game",
-            "pol_loss", "val_loss", "aux_loss",
+            "pol_loss", "val_loss", "aux_loss", "val_std",
             "vs_rand", "vs_heur", "vs_prior",
             "buffer",
         ]
@@ -674,6 +684,7 @@ def _zero_update_metrics() -> dict[str, float]:
         "policy_loss": 0.0,
         "value_loss": 0.0,
         "aux_value_loss": 0.0,
+        "value_pred_std": 0.0,
         "total_loss": 0.0,
         "grad_norm": 0.0,
     }
@@ -725,6 +736,7 @@ def _render_iter_row(summary: dict[str, float]) -> str:
         f"{float(summary.get('train/policy_loss', 0.0)):.3f}",
         f"{float(summary.get('train/value_loss', 0.0)):.3f}",
         f"{float(summary.get('train/aux_value_loss', 0.0)):.3f}",
+        f"{float(summary.get('train/value_pred_std', 0.0)):.3f}",
         _fmt_pct(_get("eval/vs_random/win_rate")),
         _fmt_pct(_get("eval/vs_heuristic/win_rate")),
         _fmt_pct(_get("eval/vs_prior_snapshot/win_rate")),

@@ -176,6 +176,20 @@ def test_train_step_emits_finite_metrics() -> None:
     assert metrics["value_loss"] >= 0.0
 
 
+def test_train_step_emits_value_pred_std_diagnostic() -> None:
+    """``value_pred_std`` must appear in the per-step metrics dict and
+    reflect the std of the value head's outputs across the batch — the
+    canonical signal for whether the value head is differentiating
+    states or collapsed to a near-constant.
+    """
+    learner = _make_vector_policy(seed=7)
+    trainer = AlphaZeroTrainer(learner, _tiny_az_config())
+    metrics = trainer._train_step(_handcrafted_batch(batch_size=4))
+    assert "value_pred_std" in metrics
+    assert metrics["value_pred_std"] >= 0.0
+    assert np.isfinite(metrics["value_pred_std"])
+
+
 def test_train_step_aux_value_loss_is_zero_when_coef_is_zero() -> None:
     """The default ``aux_value_coef=0`` reproduces canonical AZ: the
     aux MSE is still computed and reported, but its contribution to
