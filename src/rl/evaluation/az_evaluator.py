@@ -49,7 +49,6 @@ from rl.env.catan_env import CatanEnv
 from rl.evaluation.elo import EloTracker
 from rl.evaluation.metrics import GameStats, TournamentResult
 from rl.evaluation.tournament import Tournament
-from rl.utils.logging import NoOpLogger, TBLogger
 
 __all__ = ["AZEvalConfig", "AZEvaluator"]
 
@@ -96,13 +95,11 @@ class AZEvaluator:
         self,
         config: AZEvalConfig,
         env_factory: Callable[[int], CatanEnv],
-        logger: TBLogger | NoOpLogger,
         elo: EloTracker | None = None,
         ratings_path: Path | None = None,
     ) -> None:
         self._cfg = config
         self._env_factory = env_factory
-        self._logger = logger
         self._elo = elo if elo is not None else EloTracker()
         self._ratings_path = Path(ratings_path) if ratings_path else None
 
@@ -175,7 +172,9 @@ class AZEvaluator:
         """Run the configured benchmarks if ``iteration`` is on cadence.
 
         Returns ``None`` when no eval ran. Otherwise returns a flat
-        ``{name → scalar}`` dict and also logs the same scalars to TB.
+        ``{name → scalar}`` dict. The trainer is responsible for
+        forwarding the dict to TB (single SummaryWriter, consistent
+        global-step x-axis).
         """
         if self._cfg.every_iters <= 0:
             return None
@@ -224,9 +223,6 @@ class AZEvaluator:
 
         if self._ratings_path is not None:
             self._elo.save(self._ratings_path)
-
-        for name, value in metrics.items():
-            self._logger.log_scalar(f"eval/{name}", value, iteration)
 
         return metrics
 

@@ -194,10 +194,8 @@ class AlphaZeroTrainer:
         self._iteration = 0
         self._global_step = 0  # one per gradient step
         self._n_self_play_transitions = 0
-        # ``logger`` takes precedence over ``log_dir`` so a caller that
-        # wants to share one SummaryWriter across the trainer + evaluator
-        # can pass a pre-built logger; otherwise we build one off log_dir
-        # (or NoOpLogger when log_dir is None).
+        # ``logger`` takes precedence over ``log_dir``; if neither is
+        # supplied we build a NoOpLogger off log_dir=None.
         if logger is not None and log_dir is not None:
             raise ValueError(
                 "Pass either ``logger`` or ``log_dir`` to AlphaZeroTrainer, not both."

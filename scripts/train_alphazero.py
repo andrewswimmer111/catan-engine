@@ -601,8 +601,6 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    # Build the AZ evaluator once so the trainer's logger is shared with
-    # the evaluator's TB scalars (single SummaryWriter, single TB log dir).
     logger = make_logger(log_dir)
     env_factory = _env_factory_for(
         learner, victory_point_target=args.win_vp
@@ -619,7 +617,6 @@ def main(argv: list[str] | None = None) -> int:
     evaluator = AZEvaluator(
         config=eval_cfg,
         env_factory=env_factory,
-        logger=logger,
         elo=EloTracker(),
         ratings_path=output_dir / "elo.json",
     )

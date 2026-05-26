@@ -37,7 +37,6 @@ from rl.env.catan_env import CatanEnv  # noqa: E402
 from rl.evaluation.az_evaluator import AZEvalConfig, AZEvaluator  # noqa: E402
 from rl.evaluation.elo import EloTracker  # noqa: E402
 from rl.models.gnn import GNNArch, GNNPolicyValue  # noqa: E402
-from rl.utils.logging import NoOpLogger  # noqa: E402
 
 
 PLAYER_IDS = tuple(PlayerID(i) for i in range(1, 5))
@@ -91,7 +90,6 @@ def test_maybe_run_returns_none_when_disabled() -> None:
     evaluator = AZEvaluator(
         _eval_cfg(every_iters=0),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     learner = _make_policy()
     assert evaluator.maybe_run(learner, iteration=1) is None
@@ -103,7 +101,6 @@ def test_maybe_run_returns_none_off_cadence() -> None:
     evaluator = AZEvaluator(
         _eval_cfg(every_iters=3),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     learner = _make_policy()
     assert evaluator.maybe_run(learner, iteration=1) is None
@@ -129,7 +126,6 @@ def test_no_prior_snapshot_means_vs_prior_bench_is_skipped() -> None:
             bench_prior_snapshot=True,
         ),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     learner = _make_policy()
     result = evaluator.maybe_run(learner, iteration=1)
@@ -144,7 +140,6 @@ def test_refresh_prior_snapshot_seeds_on_first_call_regardless_of_threshold() ->
     evaluator = AZEvaluator(
         _eval_cfg(promotion_threshold=0.55),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     promoted = evaluator.refresh_prior_snapshot(_make_policy(), iteration=1)
     assert promoted is True
@@ -156,7 +151,6 @@ def test_continuous_mode_refreshes_prior_snapshot_every_call() -> None:
     evaluator = AZEvaluator(
         _eval_cfg(promotion_threshold=None),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     assert evaluator.refresh_prior_snapshot(_make_policy(seed=1), iteration=1)
     assert evaluator.prior_snapshot_iter == 1
@@ -169,7 +163,6 @@ def test_promotion_threshold_blocks_refresh_when_win_rate_low() -> None:
     evaluator = AZEvaluator(
         _eval_cfg(promotion_threshold=0.55),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     # Seed the first prior-snapshot (always succeeds).
     evaluator.refresh_prior_snapshot(_make_policy(seed=1), iteration=1)
@@ -185,7 +178,6 @@ def test_promotion_threshold_allows_refresh_when_win_rate_high() -> None:
     evaluator = AZEvaluator(
         _eval_cfg(promotion_threshold=0.55),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     evaluator.refresh_prior_snapshot(_make_policy(seed=1), iteration=1)
     evaluator._last_vs_prior_win_rate = 0.70  # type: ignore[attr-defined]
@@ -204,7 +196,6 @@ def test_stale_win_rate_does_not_count_for_promotion() -> None:
     evaluator = AZEvaluator(
         _eval_cfg(promotion_threshold=0.55),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
     )
     evaluator.refresh_prior_snapshot(_make_policy(seed=1), iteration=1)
     evaluator._last_vs_prior_win_rate = 0.99  # type: ignore[attr-defined]
@@ -228,7 +219,6 @@ def test_maybe_run_against_random_logs_win_rate_and_elo(tmp_path: Path) -> None:
     evaluator = AZEvaluator(
         _eval_cfg(bench_random=True, bench_heuristic=False),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
         elo=EloTracker(),
         ratings_path=ratings_path,
     )
@@ -256,7 +246,6 @@ def test_maybe_run_against_prior_snapshot(tmp_path: Path) -> None:
             bench_prior_snapshot=True,
         ),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
         elo=EloTracker(),
     )
     seed_learner = _make_policy(seed=11)
@@ -309,7 +298,6 @@ def test_alphazero_trainer_delegates_eval_to_evaluator(tmp_path: Path) -> None:
             bench_prior_snapshot=True,
         ),
         env_factory=_env_factory,
-        logger=NoOpLogger(),
         elo=EloTracker(),
     )
     trainer = AlphaZeroTrainer(
