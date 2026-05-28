@@ -119,6 +119,9 @@ def _opening_placement_metrics(state, pids: list[PlayerID]) -> dict[int, dict]:
     return out
 
 
+_PLACEMENT_PHASES = (TurnPhase.INITIAL_SETTLEMENT, TurnPhase.INITIAL_ROAD)
+
+
 def _play_one_game(
     *,
     agent,
@@ -127,6 +130,7 @@ def _play_one_game(
     game_seed: int,
     rng: random.Random,
     mode: str = "mcts",
+    placement_agent=None,
 ) -> dict:
     pids = [PlayerID(i) for i in range(1, 5)]
     n_seats = len(pids)
@@ -162,6 +166,14 @@ def _play_one_game(
         )
 
         def select_action(state, legal, move_idx):
+            # Causal check: route opening placements to a separate agent
+            # (e.g. the heuristic) while the learner still plays mid-game via
+            # MCTS. Tests whether good openings alone lift affordability.
+            if placement_agent is not None and state.phase in _PLACEMENT_PHASES:
+                snap = GameSnapshot(
+                    state=state, step_index=move_idx, last_action=None, last_events=()
+                )
+                return placement_agent.choose(snap, legal)
             move_cfg = dataclasses.replace(
                 base_mcts, seed=base_mcts.seed + move_idx
             )
@@ -534,6 +546,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the HeuristicAgent reference games (default: run them)",
     )
+    p.add_argument(
+        "--heuristic-placement",
+        action="store_true",
+        help="causal check: route the learner's opening placements to the "
+        "heuristic (learner still plays mid-game via MCTS), to test whether "
+        "good openings alone lift build affordability",
+    )
     args = p.parse_args(argv)
 
     ckpt_path = args.run_dir / args.checkpoint
@@ -559,9 +578,12 @@ def main(argv: list[str] | None = None) -> int:
         f"T_threshold_moves={sp_cfg['temperature_threshold_moves']}"
     )
     print(f"#   n_games={args.n_games} base_seed={args.seed}")
+    if args.heuristic_placement:
+        print("#   heuristic_placement=ON (learner openings → heuristic)")
     print()
 
     agent, _meta = load_checkpoint(ckpt_path, device="cpu")
+    placement_agent = HeuristicAgent() if args.heuristic_placement else None
     rng = random.Random(args.seed)
     games = []
     for i in range(args.n_games):
@@ -573,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             mcts_cfg=mcts_cfg,
             game_seed=game_seed,
             rng=rng,
+            placement_agent=placement_agent,
         )
         games.append(g)
         print(_summarise_game(g))
