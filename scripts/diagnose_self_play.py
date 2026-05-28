@@ -1,23 +1,41 @@
 #!/usr/bin/env python3
 """Diagnostic: play N self-play games at a checkpoint and report what happened.
 
-Use this to discriminate between two plateau failure modes that look
-the same in the AZ progress table:
+Originally built to split two plateau failure modes that look identical
+in the AZ progress table:
 
-* "Bad tactics" — policy builds toward 6 VP but in scattered locations,
-  loses to opponents who out-build, then stalemates. More MCTS rollouts
-  may help.
-* "Bad prior" — policy spends moves on trades / dev cards / robber
-  actions rather than building. More MCTS won't fix this; needs prior
-  changes (Dirichlet, temperature schedule) or BC pretrain.
+* "build legal but skipped" — the prior under-weights building. More MCTS
+  rollouts / exploration may help.
+* "build rarely legal" — resource starvation; building is hardly ever
+  affordable. More search can't manufacture resources; the lever is the
+  economy (placement, trades, robber).
+
+The 2026-05-28 run on #015 landed firmly in the second case (build legal
+in only ~13% of non-forced decisions, chosen ~84% of the time it was).
+So this module also instruments the *economy*, to answer the next
+question — WHY are builds rarely affordable:
+
+* per-seat opening pip-sum and resource diversity (the income rate the
+  opening placement locks in for the whole game), and
+* per-seat resource flow: produced (dice income), lost to robber +
+  7-roll discards, and spent on building.
+
+With ``--heuristic-baseline`` (default on) the same metrics are gathered
+from games played by the rule-based HeuristicAgent on the *same board
+seeds*, so the learner's economy reads against a known-decent reference.
+A low learner pip-sum vs the heuristic points at opening placement (→
+placement BC-pretrain / reward); comparable pip-sum but lower net income
+or higher losses points at mid-game resource handling.
 
 Reads the run dir's ``config.json`` so self-play knobs match training
-exactly. Prints per-game summary + aggregate action-category histogram.
+exactly. Prints per-game summaries, the action-category histogram, the
+build-opportunity split, and the economy comparison.
 
 Usage::
 
     venv/bin/python scripts/diagnose_self_play.py \\
-        runs/az_015_consolidate_20260526_173234 [--n-games 5] [--seed 0]
+        runs/az_015_consolidate_20260526_173234 [--n-games 6] [--seed 0] \\
+        [--no-heuristic-baseline]
 """
 
 from __future__ import annotations
@@ -30,13 +48,15 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from controller.session import GameSnapshot
 from domain.engine.game_engine import GameEngine
-from domain.engine.player_view import make_player_view
 from domain.engine.randomizer import SeededRandomizer
+from domain.enums import TurnPhase
 from domain.game.config import GameConfig
 from domain.ids import PlayerID
 from domain.rules.victory import compute_victory_points
 from rl.acting_player import acting_player
+from rl.agents.heuristic_agent import HeuristicAgent
 from rl.agents.search_agent import NetworkEvaluator
 from rl.search.mcts import MCTSConfig, run_mcts
 from rl.stalemate_value import StalemateValueConfig
@@ -67,10 +87,49 @@ def _vp_snapshot(state, pids: list[PlayerID]) -> list[int]:
     return [compute_victory_points(state, pid) for pid in pids]
 
 
+def _pip_value(dice_number: int | None) -> int:
+    """Dot-pips on a Catan number token: 2/12→1, 3/11→2 … 6/8→5; None→0."""
+    if dice_number is None:
+        return 0
+    return 6 - abs(7 - dice_number)
+
+
+def _opening_placement_metrics(state, pids: list[PlayerID]) -> dict[int, dict]:
+    """Per-seat opening pip-sum + resource diversity from the end-of-setup board.
+
+    pip-sum = Σ over the seat's settlements of the dot-pips of every adjacent
+    production hex — the expected resource-income rate the opening locks in
+    for the whole game. diversity = count of distinct tradeable resources those
+    hexes cover. Captured the moment setup ends, when every seat has exactly
+    its two starting settlements and no cities yet.
+    """
+    out: dict[int, dict] = {}
+    for seat, pid in enumerate(pids):
+        pip_sum = 0
+        resources: set = set()
+        for vid, (owner, _btype) in state.occupancy.buildings.items():
+            if owner != pid:
+                continue
+            for tile in state.topology.tiles_adjacent_to_vertex(vid):
+                if tile.resource is None or tile.is_desert() or tile.dice_number is None:
+                    continue
+                pip_sum += _pip_value(tile.dice_number)
+                resources.add(tile.resource)
+        out[seat] = {"pip_sum": pip_sum, "diversity": len(resources)}
+    return out
+
+
 def _play_one_game(
-    *, agent, sp_cfg: dict, mcts_cfg: dict, game_seed: int, rng: random.Random,
+    *,
+    agent,
+    sp_cfg: dict,
+    mcts_cfg: dict,
+    game_seed: int,
+    rng: random.Random,
+    mode: str = "mcts",
 ) -> dict:
     pids = [PlayerID(i) for i in range(1, 5)]
+    n_seats = len(pids)
     engine = GameEngine(SeededRandomizer(game_seed))
     state = engine.new_game(
         GameConfig(
@@ -80,30 +139,75 @@ def _play_one_game(
         )
     )
 
-    agent.model.eval()
-    evaluator = NetworkEvaluator(agent)
+    # Action selection is the only thing that differs between the learner
+    # (MCTS over the network) and the heuristic baseline. Everything else —
+    # the loop, the build-opportunity split, the economy tracking — is
+    # agent-agnostic so the two are measured identically.
+    if mode == "mcts":
+        agent.model.eval()
+        evaluator = NetworkEvaluator(agent)
+        base_mcts = MCTSConfig(
+            rollouts=mcts_cfg["rollouts"],
+            c_puct=mcts_cfg["c_puct"],
+            seed=mcts_cfg["seed"],
+            dirichlet_alpha=mcts_cfg["dirichlet_alpha"],
+            dirichlet_epsilon=mcts_cfg["dirichlet_epsilon"],
+            temperature=1.0,
+            stalemate=StalemateValueConfig(
+                shape=sp_cfg["stalemate"]["shape"],
+                flat_value=sp_cfg["stalemate"]["flat_value"],
+                low=sp_cfg["stalemate"]["low"],
+                high=sp_cfg["stalemate"]["high"],
+            ),
+        )
 
-    base_mcts = MCTSConfig(
-        rollouts=mcts_cfg["rollouts"],
-        c_puct=mcts_cfg["c_puct"],
-        seed=mcts_cfg["seed"],
-        dirichlet_alpha=mcts_cfg["dirichlet_alpha"],
-        dirichlet_epsilon=mcts_cfg["dirichlet_epsilon"],
-        temperature=1.0,
-        stalemate=StalemateValueConfig(
-            shape=sp_cfg["stalemate"]["shape"],
-            flat_value=sp_cfg["stalemate"]["flat_value"],
-            low=sp_cfg["stalemate"]["low"],
-            high=sp_cfg["stalemate"]["high"],
-        ),
-    )
+        def select_action(state, legal, move_idx):
+            move_cfg = dataclasses.replace(
+                base_mcts, seed=base_mcts.seed + move_idx
+            )
+            result = run_mcts(state, evaluator, move_cfg, engine=engine)
+            t_initial = sp_cfg["temperature_initial"]
+            t_final = sp_cfg["temperature_final"]
+            threshold = sp_cfg["temperature_threshold_moves"]
+            temperature = t_initial if move_idx < threshold else t_final
+            dist = result.policy_distribution(temperature)
+            if temperature == 0.0:
+                sample_idx = int(dist.argmax())
+            else:
+                r = rng.random()
+                cum = 0.0
+                sample_idx = len(dist) - 1
+                for i, p in enumerate(dist):
+                    cum += float(p)
+                    if r < cum:
+                        sample_idx = i
+                        break
+            return result.legal_actions[sample_idx]
+    elif mode == "heuristic":
+        def select_action(state, legal, move_idx):
+            snap = GameSnapshot(
+                state=state, step_index=move_idx, last_action=None, last_events=()
+            )
+            return agent.choose(snap, legal)
+    else:
+        raise ValueError(f"unknown mode {mode!r}")
 
     action_counts_per_player: dict[int, Counter] = {
-        i: Counter() for i in range(len(pids))
+        i: Counter() for i in range(n_seats)
     }
     vp_milestones: dict[int, dict[int, int]] = {
-        i: {} for i in range(len(pids))
+        i: {} for i in range(n_seats)
     }  # seat → {vp_level: move_idx}
+
+    # Per-seat resource flow, attributed by the action that caused the hand
+    # delta: produced = dice income, lost = robber steals + 7-roll discards,
+    # spent_build = resources converted into buildings (the good outcome).
+    produced = [0] * n_seats
+    lost_robber = [0] * n_seats
+    lost_discard = [0] * n_seats
+    spent_build = [0] * n_seats
+    n_rolls = 0
+    opening: dict[int, dict] | None = None
 
     move_idx = 0
     n_forced = 0
@@ -127,28 +231,7 @@ def _play_one_game(
             chosen = legal[0]
             n_forced += 1
         else:
-            move_cfg = dataclasses.replace(
-                base_mcts, seed=base_mcts.seed + move_idx
-            )
-            result = run_mcts(state, evaluator, move_cfg, engine=engine)
-            t_initial = sp_cfg["temperature_initial"]
-            t_final = sp_cfg["temperature_final"]
-            threshold = sp_cfg["temperature_threshold_moves"]
-            temperature = t_initial if move_idx < threshold else t_final
-            dist = result.policy_distribution(temperature)
-            if temperature == 0.0:
-                sample_idx = int(dist.argmax())
-            else:
-                r = rng.random()
-                cum = 0.0
-                sample_idx = len(dist) - 1
-                for i, p in enumerate(dist):
-                    cum += float(p)
-                    if r < cum:
-                        sample_idx = i
-                        break
-            chosen = result.legal_actions[sample_idx]
-
+            chosen = select_action(state, legal, move_idx)
             decision_points += 1
             if any(_categorise(type(a).__name__) == "build" for a in legal):
                 build_opportunities += 1
@@ -157,8 +240,35 @@ def _play_one_game(
 
         action_counts_per_player[acting_idx][type(chosen).__name__] += 1
 
+        counts_before = [state.players[pid].resource_count() for pid in pids]
         state = engine.apply_action(state, chosen).state
+        counts_after = [state.players[pid].resource_count() for pid in pids]
+        name = type(chosen).__name__
+        if "RollDice" in name:
+            n_rolls += 1
+        for seat in range(n_seats):
+            delta = counts_after[seat] - counts_before[seat]
+            if "RollDice" in name:
+                if delta > 0:
+                    produced[seat] += delta
+            elif "DiscardResources" in name:
+                if delta < 0:
+                    lost_discard[seat] += -delta
+            elif "MoveRobber" in name or "StealResource" in name:
+                if delta < 0:
+                    lost_robber[seat] += -delta
+            elif "Build" in name:  # BuildSettlement / BuildRoad / BuildCity
+                if delta < 0:
+                    spent_build[seat] += -delta
         move_idx += 1
+
+        # The instant setup ends, every seat holds exactly its two starting
+        # settlements — snapshot the opening pip-sum / diversity here.
+        if opening is None and state.phase not in (
+            TurnPhase.INITIAL_SETTLEMENT,
+            TurnPhase.INITIAL_ROAD,
+        ):
+            opening = _opening_placement_metrics(state, pids)
 
         # Snapshot VPs after the move, recording first move at which each
         # player reaches each VP level.
@@ -186,6 +296,12 @@ def _play_one_game(
         "decision_points": decision_points,
         "build_opportunities": build_opportunities,
         "build_taken_when_available": build_taken_when_available,
+        "opening": opening,
+        "produced": produced,
+        "lost_robber": lost_robber,
+        "lost_discard": lost_discard,
+        "spent_build": spent_build,
+        "n_rolls": n_rolls,
     }
 
 
@@ -235,6 +351,18 @@ def _summarise_game(g: dict) -> str:
         f"non-forced decisions ({100*bo/dp:.0f}%); "
         f"chosen {g['build_taken_when_available']}/{bo} when legal "
         f"({taken_rate:.0f}%)"
+    )
+
+    op = g["opening"]
+    if op:
+        pips = [op[s]["pip_sum"] for s in range(len(op))]
+        divs = [op[s]["diversity"] for s in range(len(op))]
+        lines.append(f"  opening: pip-sum/seat={pips} diversity/seat={divs}")
+    lost = [r + d for r, d in zip(g["lost_robber"], g["lost_discard"])]
+    lines.append(
+        f"  economy: produced/seat={g['produced']} "
+        f"lost robber+discard/seat={lost} "
+        f"spent-on-build/seat={g['spent_build']} (rolls={g['n_rolls']})"
     )
 
     return "\n".join(lines)
@@ -310,6 +438,77 @@ def _summarise_aggregate(games: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _econ_means(games: list[dict], n_seats: int = 4) -> dict[str, float]:
+    """Length-independent economy rates across a set of games.
+
+    Flow metrics are summed across all seats and divided by total rolls, so
+    they don't get skewed by game length — learner stalemates run far longer
+    than heuristic wins, so a per-game absolute would not be comparable.
+    ``build_conversion`` is the fraction of dice income that ends up paid into
+    buildings.
+    """
+    tot_pip = tot_div = open_seats = 0
+    tot_prod = tot_lost = tot_spent = tot_rolls = 0
+    for g in games:
+        op = g["opening"]
+        if op:
+            for s in range(n_seats):
+                tot_pip += op[s]["pip_sum"]
+                tot_div += op[s]["diversity"]
+            open_seats += n_seats
+        tot_prod += sum(g["produced"])
+        tot_lost += sum(g["lost_robber"]) + sum(g["lost_discard"])
+        tot_spent += sum(g["spent_build"])
+        tot_rolls += g["n_rolls"]
+    rolls = tot_rolls or 1
+    return {
+        "pip": tot_pip / (open_seats or 1),
+        "div": tot_div / (open_seats or 1),
+        "produced_per_roll": tot_prod / rolls,
+        "lost_per_roll": tot_lost / rolls,
+        "spent_per_roll": tot_spent / rolls,
+        "build_conversion": tot_spent / (tot_prod or 1),
+    }
+
+
+def _summarise_economy(
+    learner: list[dict], heuristic: list[dict] | None
+) -> str:
+    lm = _econ_means(learner)
+    hm = _econ_means(heuristic) if heuristic else None
+    rows = [
+        ("opening pip-sum (per seat)", "pip", "{:.1f}"),
+        ("opening diversity (per seat)", "div", "{:.1f}"),
+        ("produced/roll (all 4 seats)", "produced_per_roll", "{:.2f}"),
+        ("lost robber+discard/roll", "lost_per_roll", "{:.2f}"),
+        ("spent-on-build/roll", "spent_per_roll", "{:.2f}"),
+        ("build-conversion (spent/produced)", "build_conversion", "{:.0%}"),
+    ]
+    lines = ["", "## Economy comparison (same board seeds, per-roll rates)", ""]
+    if hm is not None:
+        lines.append(f"  {'metric':<36}{'learner':>10}{'heuristic':>12}")
+        for label, key, fmt in rows:
+            lines.append(
+                f"  {label:<36}{fmt.format(lm[key]):>10}{fmt.format(hm[key]):>12}"
+            )
+        lines.append("")
+        lines.append(
+            "  read: low learner pip-sum vs heuristic ⇒ opening placement is"
+        )
+        lines.append(
+            "  the starvation source (→ placement pretrain / reward). comparable"
+        )
+        lines.append(
+            "  pip-sum but lower produced/roll or conversion ⇒ mid-game handling."
+        )
+    else:
+        lines.append(f"  {'metric':<36}{'learner':>10}")
+        for label, key, fmt in rows:
+            lines.append(f"  {label:<36}{fmt.format(lm[key]):>10}")
+        lines.append("  (run without --no-heuristic-baseline for a reference column)")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="diagnose_self_play")
     p.add_argument(
@@ -329,6 +528,11 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default="final.pt",
         help="checkpoint filename inside run_dir (default: final.pt)",
+    )
+    p.add_argument(
+        "--no-heuristic-baseline",
+        action="store_true",
+        help="skip the HeuristicAgent reference games (default: run them)",
     )
     args = p.parse_args(argv)
 
@@ -375,6 +579,24 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
     print(_summarise_aggregate(games))
+
+    heuristic_games: list[dict] | None = None
+    if not args.no_heuristic_baseline:
+        heuristic = HeuristicAgent()
+        h_rng = random.Random(args.seed)
+        heuristic_games = [
+            _play_one_game(
+                agent=heuristic,
+                sp_cfg=sp_cfg,
+                mcts_cfg=mcts_cfg,
+                game_seed=args.seed + i,
+                rng=h_rng,
+                mode="heuristic",
+            )
+            for i in range(args.n_games)
+        ]
+
+    print(_summarise_economy(games, heuristic_games))
     return 0
 
 
