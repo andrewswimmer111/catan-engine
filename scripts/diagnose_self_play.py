@@ -119,6 +119,44 @@ def _opening_placement_metrics(state, pids: list[PlayerID]) -> dict[int, dict]:
     return out
 
 
+def _valid_settlement_spots(state, pid) -> int:
+    """Vertices where ``pid`` could place a settlement, IGNORING affordability —
+    empty, distance rule satisfied, and touching one of pid's roads.
+
+    Isolates the location/expansion constraint from the resource constraint:
+    near-zero means pid has no road network reaching a buildable vertex (it
+    hasn't expanded), so settlement-build stays illegal no matter how many
+    resources it holds. Mirrors ``build_rules._settlement_distance_ok`` +
+    ``_settlement_touches_my_road`` without the cost gate.
+    """
+    occ = state.occupancy
+    topo = state.topology
+    n = 0
+    for vid, v in topo.vertices.items():
+        if vid in occ.buildings:
+            continue
+        if any(bv in occ.buildings for bv in v.adjacent_vertices):
+            continue
+        if any(occ.roads.get(e.edge_id) == pid for e in topo.edges_adjacent_to_vertex(vid)):
+            n += 1
+    return n
+
+
+def _build_type_counts(g: dict) -> dict[str, int]:
+    """Mid-game build actions by type, summed over all seats of one game.
+
+    Reads the recorded action histogram, so setup placements (``Place*``) are
+    excluded — only ``Build*`` (paid, mid-game) builds are counted.
+    """
+    out = {"BuildSettlement": 0, "BuildRoad": 0, "BuildCity": 0}
+    for seat_counter in g["action_counts_per_player"].values():
+        for name, c in seat_counter.items():
+            for key in out:
+                if key in name:
+                    out[key] += c
+    return out
+
+
 _PLACEMENT_PHASES = (TurnPhase.INITIAL_SETTLEMENT, TurnPhase.INITIAL_ROAD)
 
 
@@ -232,6 +270,16 @@ def _play_one_game(
     decision_points = 0
     build_opportunities = 0
     build_taken_when_available = 0
+    # Build-type / expansion tracking, to test the road-expansion hypothesis:
+    # build stays illegal when the player has no road network reaching an empty
+    # buildable vertex, regardless of resources. `*_legal` count non-forced
+    # decisions where each Build* type is available; `settlement_spots_sum` is
+    # the cost-ignored count of placeable vertices, summed over MAIN decisions.
+    settlement_legal = 0
+    road_legal = 0
+    city_legal = 0
+    main_decisions = 0
+    settlement_spots_sum = 0
     while not state.is_terminal() and move_idx < sp_cfg["max_moves"]:
         legal = engine.legal_actions(state)
         if not legal:
@@ -245,10 +293,20 @@ def _play_one_game(
         else:
             chosen = select_action(state, legal, move_idx)
             decision_points += 1
-            if any(_categorise(type(a).__name__) == "build" for a in legal):
+            legal_names = [type(a).__name__ for a in legal]
+            if any(_categorise(n) == "build" for n in legal_names):
                 build_opportunities += 1
                 if _categorise(type(chosen).__name__) == "build":
                     build_taken_when_available += 1
+            if any("BuildSettlement" in n for n in legal_names):
+                settlement_legal += 1
+            if any("BuildRoad" in n for n in legal_names):
+                road_legal += 1
+            if any("BuildCity" in n for n in legal_names):
+                city_legal += 1
+            if state.phase is TurnPhase.MAIN:
+                main_decisions += 1
+                settlement_spots_sum += _valid_settlement_spots(state, acting_pid)
 
         action_counts_per_player[acting_idx][type(chosen).__name__] += 1
 
@@ -314,6 +372,11 @@ def _play_one_game(
         "lost_discard": lost_discard,
         "spent_build": spent_build,
         "n_rolls": n_rolls,
+        "settlement_legal": settlement_legal,
+        "road_legal": road_legal,
+        "city_legal": city_legal,
+        "main_decisions": main_decisions,
+        "settlement_spots_sum": settlement_spots_sum,
     }
 
 
@@ -375,6 +438,19 @@ def _summarise_game(g: dict) -> str:
         f"  economy: produced/seat={g['produced']} "
         f"lost robber+discard/seat={lost} "
         f"spent-on-build/seat={g['spent_build']} (rolls={g['n_rolls']})"
+    )
+
+    md = g["main_decisions"] or 1
+    bt = _build_type_counts(g)
+    lines.append(
+        f"  build-legal by type: settlement={g['settlement_legal']} "
+        f"road={g['road_legal']} city={g['city_legal']} "
+        f"(of {g['decision_points']} non-forced); "
+        f"avg settlement-spots avail={g['settlement_spots_sum']/md:.1f}"
+    )
+    lines.append(
+        f"  built mid-game (all seats): settlement={bt['BuildSettlement']} "
+        f"road={bt['BuildRoad']} city={bt['BuildCity']}"
     )
 
     return "\n".join(lines)
@@ -447,6 +523,39 @@ def _summarise_aggregate(games: list[dict]) -> str:
             f"    build CHOSEN when legal: {total_bt}/{total_bo} "
             f"({100*total_bt/total_bo:.1f}%)  ← low ⇒ prior under-weights building"
         )
+
+    total_sl = sum(g["settlement_legal"] for g in games)
+    total_rl = sum(g["road_legal"] for g in games)
+    total_cl = sum(g["city_legal"] for g in games)
+    total_md = sum(g["main_decisions"] for g in games) or 1
+    total_spots = sum(g["settlement_spots_sum"] for g in games)
+    bt_tot = {"BuildSettlement": 0, "BuildRoad": 0, "BuildCity": 0}
+    for g in games:
+        for k, v in _build_type_counts(g).items():
+            bt_tot[k] += v
+    lines.append("")
+    lines.append("  build-legal by type + expansion (road-expansion test):")
+    lines.append(
+        f"    settlement legal in {total_sl}/{total_dp} non-forced "
+        f"({100*total_sl/total_dp:.1f}%)"
+    )
+    lines.append(
+        f"    road legal       in {total_rl}/{total_dp} "
+        f"({100*total_rl/total_dp:.1f}%)"
+    )
+    lines.append(
+        f"    city legal       in {total_cl}/{total_dp} "
+        f"({100*total_cl/total_dp:.1f}%)"
+    )
+    lines.append(
+        f"    avg valid settlement-spots (cost-ignored) / MAIN decision = "
+        f"{total_spots/total_md:.2f}  ← ~0 ⇒ no road network to new spots"
+    )
+    lines.append(
+        f"    built mid-game (all seats): "
+        f"settlement={bt_tot['BuildSettlement']} road={bt_tot['BuildRoad']} "
+        f"city={bt_tot['BuildCity']}"
+    )
     return "\n".join(lines)
 
 
@@ -461,6 +570,7 @@ def _econ_means(games: list[dict], n_seats: int = 4) -> dict[str, float]:
     """
     tot_pip = tot_div = open_seats = 0
     tot_prod = tot_lost = tot_spent = tot_rolls = 0
+    tot_spots = tot_main = tot_roads = tot_settles = 0
     for g in games:
         op = g["opening"]
         if op:
@@ -472,6 +582,11 @@ def _econ_means(games: list[dict], n_seats: int = 4) -> dict[str, float]:
         tot_lost += sum(g["lost_robber"]) + sum(g["lost_discard"])
         tot_spent += sum(g["spent_build"])
         tot_rolls += g["n_rolls"]
+        tot_spots += g["settlement_spots_sum"]
+        tot_main += g["main_decisions"]
+        btc = _build_type_counts(g)
+        tot_roads += btc["BuildRoad"]
+        tot_settles += btc["BuildSettlement"]
     rolls = tot_rolls or 1
     return {
         "pip": tot_pip / (open_seats or 1),
@@ -480,6 +595,9 @@ def _econ_means(games: list[dict], n_seats: int = 4) -> dict[str, float]:
         "lost_per_roll": tot_lost / rolls,
         "spent_per_roll": tot_spent / rolls,
         "build_conversion": tot_spent / (tot_prod or 1),
+        "settlement_spots": tot_spots / (tot_main or 1),
+        "roads_built_per_game": tot_roads / len(games),
+        "settles_built_per_game": tot_settles / len(games),
     }
 
 
@@ -495,6 +613,9 @@ def _summarise_economy(
         ("lost robber+discard/roll", "lost_per_roll", "{:.2f}"),
         ("spent-on-build/roll", "spent_per_roll", "{:.2f}"),
         ("build-conversion (spent/produced)", "build_conversion", "{:.0%}"),
+        ("valid settlement-spots / MAIN dec", "settlement_spots", "{:.2f}"),
+        ("roads built / game (all seats)", "roads_built_per_game", "{:.1f}"),
+        ("settlements built / game", "settles_built_per_game", "{:.1f}"),
     ]
     lines = ["", "## Economy comparison (same board seeds, per-roll rates)", ""]
     if hm is not None:
