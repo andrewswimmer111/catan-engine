@@ -31,11 +31,26 @@ Reads the run dir's ``config.json`` so self-play knobs match training
 exactly. Prints per-game summaries, the action-category histogram, the
 build-opportunity split, and the economy comparison.
 
+``config.json`` is **optional**: when it's missing or lacks the AZ
+``self_play`` / ``mcts`` blocks (e.g. a behavioural-cloning run dir from
+``scripts/pretrain_bc.py``), the diagnostic falls back to dataclass
+defaults and the self-play knobs are supplied on the CLI instead
+(``--win-vp``, ``--mcts-rollouts``, …). The same flags also override a
+present ``config.json`` — handy for re-diagnosing an old run at a
+different VP threshold or rollout budget. Resolution order per knob:
+dataclass default → ``config.json`` block (if present) → CLI flag (if
+passed).
+
 Usage::
 
+    # AZ run (reads config.json, as before):
     venv/bin/python scripts/diagnose_self_play.py \\
         runs/az_015_consolidate_20260526_173234 [--n-games 6] [--seed 0] \\
         [--no-heuristic-baseline]
+
+    # BC checkpoint (no AZ config.json) — supply the knobs on the CLI:
+    venv/bin/python scripts/diagnose_self_play.py \\
+        runs/bc_001 --win-vp 6 --mcts-rollouts 50 --n-games 6
 """
 
 from __future__ import annotations
@@ -61,6 +76,7 @@ from rl.agents.search_agent import NetworkEvaluator
 from rl.search.mcts import MCTSConfig, run_mcts
 from rl.stalemate_value import StalemateValueConfig
 from rl.training.checkpoint import load_checkpoint
+from rl.training.self_play import SelfPlayConfig
 
 
 # Coarse-grained action categories. Class names are matched as substrings
@@ -642,12 +658,101 @@ def _summarise_economy(
     return "\n".join(lines)
 
 
+def _default_sp_cfg() -> dict:
+    """Self-play knobs from :class:`SelfPlayConfig` defaults, in the dict
+    shape :func:`_play_one_game` consumes."""
+    sp = SelfPlayConfig()
+    st = sp.stalemate
+    return {
+        "victory_point_target": sp.victory_point_target,
+        "max_moves": sp.max_moves,
+        "temperature_initial": sp.temperature_initial,
+        "temperature_final": sp.temperature_final,
+        "temperature_threshold_moves": sp.temperature_threshold_moves,
+        "stalemate": {
+            "shape": st.shape,
+            "flat_value": st.flat_value,
+            "low": st.low,
+            "high": st.high,
+        },
+    }
+
+
+def _default_mcts_cfg() -> dict:
+    """MCTS knobs from :class:`MCTSConfig` defaults, in dict shape."""
+    m = MCTSConfig()
+    return {
+        "rollouts": m.rollouts,
+        "c_puct": m.c_puct,
+        "seed": m.seed,
+        "dirichlet_alpha": m.dirichlet_alpha,
+        "dirichlet_epsilon": m.dirichlet_epsilon,
+    }
+
+
+# Self-play keys we copy from a present ``config.json`` (stalemate is a
+# nested block, handled separately).
+_SP_KEYS = (
+    "victory_point_target",
+    "max_moves",
+    "temperature_initial",
+    "temperature_final",
+    "temperature_threshold_moves",
+)
+_MCTS_KEYS = ("rollouts", "c_puct", "seed", "dirichlet_alpha", "dirichlet_epsilon")
+
+
+def _resolve_configs(full_cfg: dict, args: argparse.Namespace) -> tuple[dict, dict]:
+    """Layer dataclass defaults, the run's ``config.json``, and CLI flags.
+
+    Per knob: start from the dataclass default, overlay the matching
+    ``config.json`` block if present, then overlay any explicitly-passed
+    CLI flag (the override flags default to ``None`` so "passed" is
+    distinguishable from "left at default"). This makes ``config.json``
+    optional — a BC run dir has neither ``self_play`` nor ``mcts``, so
+    those fall through to defaults + CLI — while keeping the existing
+    AZ-run behaviour (read everything from ``config.json``) intact when
+    no override flags are given.
+    """
+    sp = _default_sp_cfg()
+    mcts = _default_mcts_cfg()
+
+    sp_block = full_cfg.get("self_play", {})
+    for k in _SP_KEYS:
+        if k in sp_block:
+            sp[k] = sp_block[k]
+    if "stalemate" in full_cfg:
+        sp["stalemate"] = {**sp["stalemate"], **full_cfg["stalemate"]}
+
+    mcts_block = full_cfg.get("mcts", {})
+    for k in _MCTS_KEYS:
+        if k in mcts_block:
+            mcts[k] = mcts_block[k]
+
+    # CLI overrides (authoritative when passed).
+    if args.win_vp is not None:
+        sp["victory_point_target"] = args.win_vp
+    if args.max_moves is not None:
+        sp["max_moves"] = args.max_moves
+    if args.mcts_rollouts is not None:
+        mcts["rollouts"] = args.mcts_rollouts
+    if args.mcts_cpuct is not None:
+        mcts["c_puct"] = args.mcts_cpuct
+    if args.dirichlet_epsilon is not None:
+        mcts["dirichlet_epsilon"] = args.dirichlet_epsilon
+    if args.mcts_seed is not None:
+        mcts["seed"] = args.mcts_seed
+
+    return sp, mcts
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="diagnose_self_play")
     p.add_argument(
         "run_dir",
         type=Path,
-        help="run directory (must contain final.pt and config.json)",
+        help="run directory containing the checkpoint; config.json is "
+        "optional (see the config-override flags below)",
     )
     p.add_argument("--n-games", type=int, default=5)
     p.add_argument(
@@ -674,6 +779,26 @@ def main(argv: list[str] | None = None) -> int:
         "heuristic (learner still plays mid-game via MCTS), to test whether "
         "good openings alone lift build affordability",
     )
+    # Config overrides. Default None so "passed" is distinguishable from
+    # "left at default"; supplied values win over config.json, and let the
+    # diagnostic run on a checkpoint whose run dir has no AZ config.json
+    # (e.g. a behavioural-cloning run from scripts/pretrain_bc.py).
+    ov = p.add_argument_group(
+        "config overrides",
+        "supply self-play / MCTS knobs on the CLI; override config.json "
+        "when present, or stand in for it when absent",
+    )
+    ov.add_argument("--win-vp", type=int, default=None,
+                    help="victory_point_target for ending a game in a win")
+    ov.add_argument("--max-moves", type=int, default=None,
+                    help="hard per-game move cap (truncates as stalemate)")
+    ov.add_argument("--mcts-rollouts", type=int, default=None)
+    ov.add_argument("--mcts-cpuct", type=float, default=None)
+    ov.add_argument("--dirichlet-epsilon", type=float, default=None,
+                    help="root-noise mix weight; 0 (MCTSConfig default) shows "
+                    "the policy's sharpest preference, 0.25 matches AZ self-play")
+    ov.add_argument("--mcts-seed", type=int, default=None,
+                    help="base seed for the per-move MCTS config")
     args = p.parse_args(argv)
 
     ckpt_path = args.run_dir / args.checkpoint
@@ -681,13 +806,19 @@ def main(argv: list[str] | None = None) -> int:
     if not ckpt_path.is_file():
         print(f"error: missing checkpoint {ckpt_path}", file=sys.stderr)
         return 2
-    if not cfg_path.is_file():
-        print(f"error: missing config {cfg_path}", file=sys.stderr)
-        return 2
 
-    full_cfg = json.loads(cfg_path.read_text())
-    sp_cfg = {**full_cfg["self_play"], "stalemate": full_cfg["stalemate"]}
-    mcts_cfg = full_cfg["mcts"]
+    full_cfg: dict = {}
+    if cfg_path.is_file():
+        full_cfg = json.loads(cfg_path.read_text())
+    has_az_blocks = "self_play" in full_cfg and "mcts" in full_cfg
+    if not has_az_blocks:
+        print(
+            f"# note: {cfg_path} "
+            + ("missing" if not cfg_path.is_file() else "lacks self_play/mcts blocks")
+            + " — using dataclass defaults + CLI overrides",
+            file=sys.stderr,
+        )
+    sp_cfg, mcts_cfg = _resolve_configs(full_cfg, args)
 
     print(f"# Diagnostic for {ckpt_path}")
     print(
