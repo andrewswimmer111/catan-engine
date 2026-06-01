@@ -242,22 +242,54 @@ class AZEvaluator:
         iteration: int,
         seed_offset: int,
     ) -> None:
-        """Play ``n_games`` of learner vs three ``opponent_factory()`` seats."""
+        """Play ``n_games`` of learner vs ``opponent_factory()`` opponents,
+        rotating the learner across every seat in ``player_ids``.
+
+        Without rotation the learner is pinned to a single seat (Catan's
+        turn-order asymmetry is large — see the post-az-018 diagnostic:
+        seat-1 win-rate 4% vs seat-2/4 ~24%), so the eval signal is
+        confounded with seat advantage. Games are distributed
+        ``divmod(n_games, n_seats)`` across seats; with 4 seats, prefer
+        ``n_games`` divisible by 4.
+        """
         seed = self._cfg.base_seed + iteration * 1_009 + seed_offset
         rng = random.Random(seed)
-        learner_seat = self._cfg.player_ids[0]
-        agents: dict[PlayerID, Agent] = {learner_seat: learner}
-        for pid in self._cfg.player_ids[1:]:
-            agents[pid] = opponent_factory(random.Random(rng.randrange(2**32)))
-        result = Tournament(self._env_factory).play(
-            agents, n_games=self._cfg.n_games, base_seed=seed
-        )
+        n_seats = len(self._cfg.player_ids)
+        games_per_seat, remainder = divmod(self._cfg.n_games, n_seats)
 
-        win_rate = float(result.win_rates.get(learner_seat, 0.0))
-        self._update_elo_from_result(result, learner_id, opponent_id, learner_seat)
+        all_games: list = []
+        total_wins = 0
+        total_games = 0
+        for seat_idx, learner_seat in enumerate(self._cfg.player_ids):
+            n_this_seat = games_per_seat + (1 if seat_idx < remainder else 0)
+            if n_this_seat == 0:
+                continue
+            agents: dict[PlayerID, Agent] = {learner_seat: learner}
+            for pid in self._cfg.player_ids:
+                if pid == learner_seat:
+                    continue
+                agents[pid] = opponent_factory(random.Random(rng.randrange(2**32)))
+            seat_seed = seed + seat_idx * 10_007
+            result = Tournament(self._env_factory).play(
+                agents, n_games=n_this_seat, base_seed=seat_seed
+            )
+            self._update_elo_from_result(result, learner_id, opponent_id, learner_seat)
+            seat_wins = sum(1 for g in result.games if g.winner == learner_seat)
+            metrics[f"{bench_name}/win_rate_seat_{int(learner_seat)}"] = (
+                seat_wins / n_this_seat
+            )
+            all_games.extend(result.games)
+            total_wins += seat_wins
+            total_games += n_this_seat
+
+        win_rate = total_wins / total_games if total_games else 0.0
+        mean_turns = (
+            sum(g.turn_count for g in all_games) / len(all_games)
+            if all_games else 0.0
+        )
         metrics[f"{bench_name}/win_rate"] = win_rate
         metrics[f"{bench_name}/elo"] = self._elo.rating(learner_id)
-        metrics[f"{bench_name}/mean_turns"] = float(result.mean_turns)
+        metrics[f"{bench_name}/mean_turns"] = float(mean_turns)
 
     def _update_elo_from_result(
         self,

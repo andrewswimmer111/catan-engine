@@ -25,6 +25,9 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 
+from collections import Counter  # noqa: E402
+
+from domain.enums import EndReason  # noqa: E402
 from domain.ids import PlayerID  # noqa: E402
 from rl.agents.policy_agent import PolicyAgent  # noqa: E402
 from rl.encoding._action_layout import ACTION_SPACE_SIZE  # noqa: E402
@@ -36,6 +39,7 @@ from rl.encoding.graph_observation import (  # noqa: E402
 from rl.env.catan_env import CatanEnv  # noqa: E402
 from rl.evaluation.az_evaluator import AZEvalConfig, AZEvaluator  # noqa: E402
 from rl.evaluation.elo import EloTracker  # noqa: E402
+from rl.evaluation.metrics import GameStats, TournamentResult  # noqa: E402
 from rl.models.gnn import GNNArch, GNNPolicyValue  # noqa: E402
 
 
@@ -207,6 +211,72 @@ def test_stale_win_rate_does_not_count_for_promotion() -> None:
 
 
 # ----------------------------------------------------------------------
+# Seat rotation
+# ----------------------------------------------------------------------
+
+
+def test_run_anchor_rotates_learner_across_seats(monkeypatch) -> None:
+    """``_run_anchor`` distributes ``n_games`` evenly across all seats.
+
+    Pinning the learner to one seat confounds the eval signal with seat
+    advantage (P1 is dramatically weaker than P2-P4 in Catan), so each
+    anchor must rotate. Uses a fake Tournament to avoid real games.
+    """
+    seat_assignments: list[PlayerID] = []
+
+    class _FakeTournament:
+        def __init__(self, env_factory): pass
+
+        def play(self, agents, n_games, base_seed):
+            learner_seat = next(
+                pid for pid, agent in agents.items()
+                if isinstance(agent, PolicyAgent)
+            )
+            for _ in range(n_games):
+                seat_assignments.append(learner_seat)
+            games = [
+                GameStats(
+                    winner=learner_seat,
+                    final_vps={pid: 0 for pid in agents},
+                    turn_count=10,
+                    end_reason=EndReason.WINNER,
+                    action_histogram={},
+                    per_seat_action_histogram={pid: {} for pid in agents},
+                )
+                for _ in range(n_games)
+            ]
+            return TournamentResult(
+                games=games,
+                win_rates={
+                    pid: (1.0 if pid == learner_seat else 0.0)
+                    for pid in agents
+                },
+                mean_vp={pid: 0.0 for pid in agents},
+                mean_turns=10.0,
+            )
+
+    monkeypatch.setattr(
+        "rl.evaluation.az_evaluator.Tournament", _FakeTournament
+    )
+
+    evaluator = AZEvaluator(
+        _eval_cfg(n_games=8, bench_random=True, bench_heuristic=False),
+        env_factory=_env_factory,
+    )
+    result = evaluator.maybe_run(_make_policy(), iteration=1)
+
+    assert result is not None
+    # 8 games / 4 seats → 2 per seat, no remainder.
+    counts = Counter(seat_assignments)
+    assert counts == {pid: 2 for pid in PLAYER_IDS}
+    # Per-seat metric keys present (1-indexed by PlayerID).
+    for pid in PLAYER_IDS:
+        assert f"vs_random/win_rate_seat_{int(pid)}" in result
+    # Learner wins every fake game → aggregate is 1.0.
+    assert result["vs_random/win_rate"] == 1.0
+
+
+# ----------------------------------------------------------------------
 # Eval + Elo integration
 # ----------------------------------------------------------------------
 
@@ -217,7 +287,7 @@ def test_maybe_run_against_random_logs_win_rate_and_elo(tmp_path: Path) -> None:
     elo + mean_turns, and the ratings file is written."""
     ratings_path = tmp_path / "elo.json"
     evaluator = AZEvaluator(
-        _eval_cfg(bench_random=True, bench_heuristic=False),
+        _eval_cfg(n_games=4, bench_random=True, bench_heuristic=False),
         env_factory=_env_factory,
         elo=EloTracker(),
         ratings_path=ratings_path,
@@ -228,6 +298,9 @@ def test_maybe_run_against_random_logs_win_rate_and_elo(tmp_path: Path) -> None:
     assert "vs_random/win_rate" in result
     assert "vs_random/elo" in result
     assert "vs_random/mean_turns" in result
+    # Per-seat keys present for all 4 seats (n_games=4 → 1 per seat).
+    for pid in PLAYER_IDS:
+        assert f"vs_random/win_rate_seat_{int(pid)}" in result
     # Ratings file written + parseable JSON.
     assert ratings_path.exists()
     parsed = json.loads(ratings_path.read_text())
