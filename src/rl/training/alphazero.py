@@ -118,9 +118,14 @@ class AZTrainConfig:
     max_grad_norm: float = 5.0
 
     # Cadence
-    eval_every_iters: int = 5
-    eval_games: int = 20
-    snapshot_every_iters: int = 5
+    # ``eval_games`` should be a multiple of 4 — the evaluator rotates the
+    # learner across all 4 seats, and remainders go to the lower-indexed
+    # seats (so 48 → 12/12/12/12, 50 → 13/13/12/12). 48 games per anchor
+    # gives ~±11% 2σ resolution on a 17% win-rate, vs. ±26% at 8 games —
+    # large enough to distinguish iter-to-iter movement from noise.
+    eval_every_iters: int = 4
+    eval_games: int = 48
+    snapshot_every_iters: int = 4
     log_every_iters: int = 1
 
     # Parallel self-play (az-009).

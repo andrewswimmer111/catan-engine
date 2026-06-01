@@ -73,8 +73,8 @@ class AZEvalConfig:
       reproducible.
     """
 
-    every_iters: int = 5
-    n_games: int = 20
+    every_iters: int = 4
+    n_games: int = 48
     bench_random: bool = True
     bench_heuristic: bool = True
     bench_prior_snapshot: bool = True

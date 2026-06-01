@@ -39,9 +39,9 @@ DEFAULT_TRAIN_ARGS=(
     --batch-size 64
     --mcts-rollouts 30
     --buffer-capacity 10000
-    --eval-every 5
-    --eval-games 8
-    --snapshot-every 5
+    --eval-every 4
+    --eval-games 48
+    --snapshot-every 4
 )
 
 usage() {
