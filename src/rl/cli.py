@@ -126,6 +126,14 @@ def build_parser() -> argparse.ArgumentParser:
              "Defaults to CPU; 'mps' enables Metal on macOS, 'cuda' on a "
              "CUDA GPU host.",
     )
+    p_eval.add_argument(
+        "--win-vp",
+        type=int,
+        default=10,
+        help="victory_point_target for the eval games. Default 10 (the "
+             "engine default); pass 6/7/8 to match the curriculum threshold "
+             "the learner was trained at.",
+    )
 
     p_bench = sub.add_parser("benchmark", help="run all baseline benchmarks")
     p_bench.add_argument("--games", type=int, default=20)
@@ -203,6 +211,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         n_games=args.games,
         base_seed=args.seed,
         replay_dir=output_dir,
+        env_factory=_env_factory_for(args.win_vp),
     )
     comparison = aggregate_evaluation(
         learner_label=learner_label,
@@ -313,6 +322,13 @@ def _env_factory(seed: int) -> CatanEnv:
     return CatanEnv(seed=seed)
 
 
+def _env_factory_for(victory_point_target: int):
+    def factory(seed: int) -> CatanEnv:
+        return CatanEnv(seed=seed, victory_point_target=victory_point_target)
+
+    return factory
+
+
 def _load_learner(path: Path, *, device=None) -> tuple[PolicyAgent, str]:
     agent, _ = load_checkpoint(path, device=device or "cpu")
     return agent, f"checkpoint[{path.name}]"
@@ -355,6 +371,7 @@ def _run_rotated_tournament(
     n_games: int,
     base_seed: int,
     replay_dir: Path | None,
+    env_factory=_env_factory,
 ) -> list[RotationResult]:
     """Run ``n_games`` total games rotating the learner through every seat.
 
@@ -387,9 +404,10 @@ def _run_rotated_tournament(
                 base_seed=cursor_seed,
                 replay_dir=replay_dir,
                 prefix=f"r{rot_idx}",
+                env_factory=env_factory,
             )
         else:
-            result = Tournament(_env_factory).play(
+            result = Tournament(env_factory).play(
                 agents, n_games=n_round, base_seed=cursor_seed
             )
             paths = [None] * len(result.games)
@@ -417,6 +435,7 @@ def _play_with_replay(
     base_seed: int,
     replay_dir: Path,
     prefix: str,
+    env_factory=_env_factory,
 ) -> tuple[list[Path | None], "TournamentResult"]:  # noqa: F821
     """Tournament play that side-channels per-game replays to disk.
 
@@ -441,7 +460,7 @@ def _play_with_replay(
 
     for i in range(n_games):
         seed = base_seed + i
-        env = _env_factory(seed)
+        env = env_factory(seed)
         player_ids = list(env.state.config.player_ids)
         config = env.state.config
 
