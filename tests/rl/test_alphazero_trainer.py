@@ -37,9 +37,16 @@ from rl.encoding.graph_observation import (  # noqa: E402
 from rl.env.catan_env import CatanEnv  # noqa: E402
 from rl.models.gnn import GNNArch, GNNPolicyValue  # noqa: E402
 from rl.search.mcts import MCTSConfig  # noqa: E402
+from rl.encoding.graph_observation import GRAPH_OBS_LAYOUT_VERSION  # noqa: E402
 from rl.training.alphazero import AlphaZeroTrainer, AZTrainConfig  # noqa: E402
 from rl.training.az_buffer import AZBatch  # noqa: E402
-from rl.training.checkpoint import load_checkpoint  # noqa: E402
+from rl.training.checkpoint import (  # noqa: E402
+    ACTION_LAYOUT_VERSION,
+    CheckpointMeta,
+    ModelArch,
+    load_checkpoint,
+    save_checkpoint,
+)
 from rl.training.self_play import (  # noqa: E402
     SelfPlayConfig,
     SelfPlayTransition,
@@ -224,6 +231,177 @@ def test_train_step_aux_value_loss_contributes_when_coef_positive() -> None:
         + cfg.aux_value_coef * metrics["aux_value_loss"]
     )
     assert metrics["total_loss"] == pytest.approx(expected_total, rel=1e-5)
+
+
+# ----------------------------------------------------------------------
+# KL-to-BC-anchor regulariser
+# ----------------------------------------------------------------------
+
+
+def _vector_meta() -> CheckpointMeta:
+    """A minimal meta tagging a tiny-GNN, vector-head graph checkpoint."""
+    return CheckpointMeta(
+        obs_layout_version=GRAPH_OBS_LAYOUT_VERSION,
+        action_layout_version=ACTION_LAYOUT_VERSION,
+        model_arch=ModelArch(
+            obs_dim=GRAPH_OBS_SHAPE[0],
+            action_dim=ACTION_SPACE_SIZE,
+            encoder_kind="graph",
+            gnn_arch=_TINY_GNN_VECTOR,
+        ),
+        train_step=0,
+        timestamp=0.0,
+        config_hash="bc-anchor-test",
+    )
+
+
+def _save_vector_checkpoint(seed: int, path: Path) -> None:
+    """Build a tiny vector-head policy at ``seed`` and persist it to ``path``."""
+    save_checkpoint(_make_vector_policy(seed=seed), path, _vector_meta())
+
+
+def test_train_step_kl_anchor_zero_when_unconfigured() -> None:
+    """Default config (no anchor, coef=0) ⇒ ``kl_anchor_loss`` is exactly
+    zero and does NOT contribute to ``total_loss``. Pins the canonical
+    AZ path — a future refactor that, say, always forwards an anchor
+    must not silently change behaviour here.
+    """
+    learner = _make_vector_policy(seed=11)
+    cfg = _tiny_az_config()
+    assert cfg.bc_anchor_path is None
+    assert cfg.bc_anchor_coef == 0.0
+    trainer = AlphaZeroTrainer(learner, cfg)
+    metrics = trainer._train_step(_handcrafted_batch(batch_size=4))
+    assert metrics["kl_anchor_loss"] == 0.0
+    expected_total = (
+        metrics["policy_loss"] + cfg.value_coef * metrics["value_loss"]
+    )
+    assert metrics["total_loss"] == pytest.approx(expected_total, rel=1e-5)
+
+
+def test_constructor_rejects_coef_without_path() -> None:
+    """``bc_anchor_coef > 0`` with no path is a config error — the
+    knob would silently no-op, which is worse than a loud failure."""
+    learner = _make_vector_policy(seed=12)
+    cfg = dataclasses.replace(_tiny_az_config(), bc_anchor_coef=0.5)
+    with pytest.raises(ValueError, match="bc_anchor_path"):
+        AlphaZeroTrainer(learner, cfg)
+
+
+def test_constructor_rejects_path_without_coef(tmp_path: Path) -> None:
+    """A path with ``coef <= 0`` is a config error — we'd load the
+    anchor and burn a forward per batch with no contribution."""
+    anchor_path = tmp_path / "anchor.pt"
+    _save_vector_checkpoint(seed=13, path=anchor_path)
+    learner = _make_vector_policy(seed=14)
+    cfg = dataclasses.replace(_tiny_az_config(), bc_anchor_path=anchor_path)
+    with pytest.raises(ValueError, match="bc_anchor_coef"):
+        AlphaZeroTrainer(learner, cfg)
+
+
+def test_train_step_kl_anchor_self_anchor_is_zero(tmp_path: Path) -> None:
+    """Anchor weights == learner weights ⇒ KL ≈ 0 on the first batch.
+
+    Save the learner's checkpoint, load it as the anchor, run one
+    ``_train_step`` *before* any optimizer step has shifted the
+    learner — the two forwards should produce identical logits, so
+    KL(anchor || learner) should round to zero.
+    """
+    learner = _make_vector_policy(seed=15)
+    anchor_path = tmp_path / "anchor.pt"
+    save_checkpoint(learner, anchor_path, _vector_meta())
+    cfg = dataclasses.replace(
+        _tiny_az_config(),
+        bc_anchor_path=anchor_path,
+        bc_anchor_coef=1.0,
+    )
+    trainer = AlphaZeroTrainer(learner, cfg)
+    metrics = trainer._train_step(_handcrafted_batch(batch_size=4))
+    assert metrics["kl_anchor_loss"] == pytest.approx(0.0, abs=1e-5)
+
+
+def _real_obs_batch(batch_size: int, seed: int) -> AZBatch:
+    """A batch of distinct real env-reset observations.
+
+    Symmetric zero observations (the ``_handcrafted_batch`` default)
+    make both random-init models produce *uniform* legal-slot logits —
+    KL between two uniforms is zero. A real reset breaks that
+    symmetry: each row's board topology + dot values flows through
+    the GNN and gives a non-trivial logit distribution.
+    """
+    obs_rows: list[np.ndarray] = []
+    mask_rows: list[np.ndarray] = []
+    for i in range(batch_size):
+        env = _graph_env_factory(seed + i)
+        obs_single, _ = env.reset(seed=seed + i)
+        obs_rows.append(np.asarray(obs_single, dtype=np.float32))
+        mask_rows.append(np.asarray(env.action_mask(), dtype=bool))
+    obs = np.stack(obs_rows, axis=0)
+    mask = np.stack(mask_rows, axis=0)
+    policy_target = mask.astype(np.float32)
+    policy_target /= policy_target.sum(axis=-1, keepdims=True)
+    value = np.zeros((batch_size, N_PLAYERS), dtype=np.float32)
+    vp_aux = np.zeros((batch_size, N_PLAYERS), dtype=np.float32)
+    return AZBatch(
+        obs=obs,
+        action_mask=mask,
+        policy_target=policy_target,
+        value_target=value,
+        vp_aux_target=vp_aux,
+    )
+
+
+def test_train_step_kl_anchor_contributes_to_total_loss(tmp_path: Path) -> None:
+    """With a different-init anchor and ``bc_anchor_coef > 0``, the KL
+    term must show up in ``total_loss`` with the right coefficient
+    (otherwise the knob is dead). Mirrors the aux-value-coef test.
+
+    Also asserts the KL itself is non-zero — guards against a future
+    refactor that quietly always emits 0.0 (which would still satisfy
+    the additive total_loss check).
+    """
+    anchor_path = tmp_path / "anchor.pt"
+    _save_vector_checkpoint(seed=21, path=anchor_path)
+    learner = _make_vector_policy(seed=22)
+    cfg = dataclasses.replace(
+        _tiny_az_config(),
+        bc_anchor_path=anchor_path,
+        bc_anchor_coef=0.5,
+    )
+    trainer = AlphaZeroTrainer(learner, cfg)
+    metrics = trainer._train_step(_real_obs_batch(batch_size=8, seed=123))
+    assert metrics["kl_anchor_loss"] > 0.0
+    expected_total = (
+        metrics["policy_loss"]
+        + cfg.value_coef * metrics["value_loss"]
+        + cfg.aux_value_coef * metrics["aux_value_loss"]
+        + cfg.bc_anchor_coef * metrics["kl_anchor_loss"]
+    )
+    assert metrics["total_loss"] == pytest.approx(expected_total, rel=1e-5)
+
+
+def test_bc_anchor_params_remain_frozen_after_train_step(tmp_path: Path) -> None:
+    """The anchor must NOT receive gradients: its weights must be
+    identical before and after a learner update. Regression guard for
+    any future refactor that, say, forgets to call requires_grad_(False)
+    or accidentally registers the anchor as a submodule of the learner.
+    """
+    anchor_path = tmp_path / "anchor.pt"
+    _save_vector_checkpoint(seed=31, path=anchor_path)
+    learner = _make_vector_policy(seed=32)
+    cfg = dataclasses.replace(
+        _tiny_az_config(),
+        bc_anchor_path=anchor_path,
+        bc_anchor_coef=1.0,
+    )
+    trainer = AlphaZeroTrainer(learner, cfg)
+    anchor = trainer._bc_anchor  # noqa: SLF001
+    assert anchor is not None
+    before = {k: v.detach().clone() for k, v in anchor.model.state_dict().items()}
+    trainer._train_step(_real_obs_batch(batch_size=8, seed=123))
+    after = anchor.model.state_dict()
+    for k, v_before in before.items():
+        assert torch.equal(v_before, after[k]), f"anchor weight {k} moved during _train_step"
 
 
 def test_train_step_handles_illegal_action_masking() -> None:

@@ -64,6 +64,7 @@ from rl.training.az_buffer import AZBatch, AZReplayBuffer
 from rl.training.checkpoint import (
     ACTION_LAYOUT_VERSION,
     CheckpointMeta,
+    load_checkpoint,
     model_arch_from,
     obs_layout_version_for,
     save_checkpoint,
@@ -112,6 +113,22 @@ class AZTrainConfig:
     ``value_target``). Use ~0.1-0.5 to break the cold-bootstrap loop
     where the value head never observes a real win (run #AZ-1's and
     #011 pilot's failure mode); 0.0 (default) reproduces canonical AZ.
+    """
+    bc_anchor_path: Path | None = None
+    bc_anchor_coef: float = 0.0
+    """KL-to-BC-anchor regularisation: pull learner toward a frozen clone.
+
+    When ``bc_anchor_coef > 0`` and ``bc_anchor_path`` points at a
+    graph-encoder checkpoint, the trainer loads that checkpoint at
+    init time, freezes it, and on every batch adds
+    ``bc_anchor_coef * KL(anchor || learner)`` (summed over legal
+    actions, mean over batch) to the total loss. The intent is to
+    prevent AZ self-play from eroding habits learned during a
+    behavioural-cloning warm-start — observed on az_019 where roads
+    built/game regressed from bc_001's 13.3 back to the az_015
+    plateau's 10.5 over 20 iterations. Both fields must be set
+    together or both left at their defaults; the constructor errors
+    otherwise.
     """
     batch_size: int = 128
     batches_per_iter: int = 100
@@ -239,6 +256,12 @@ class AlphaZeroTrainer:
         self._obs_layout_version = obs_layout_version_for(
             self._model_arch.encoder_kind
         )
+
+        # KL-to-BC-anchor regulariser. Loaded once, frozen, kept in eval
+        # mode for the lifetime of the trainer. Both fields must agree:
+        # a coef without a path can't act, and a path without a coef
+        # would silently waste a forward pass per batch.
+        self._bc_anchor: PolicyAgent | None = self._maybe_load_bc_anchor()
 
     # ------------------------------------------------------------------
     # Public API
@@ -435,10 +458,32 @@ class AlphaZeroTrainer:
         # never observes terminal wins).
         aux_value_loss = (out.value - vp_aux_target_t).pow(2).mean()
 
+        # KL-to-BC-anchor: pull the learner toward a frozen behavioural
+        # clone on every batch. Skipped (zero scalar, no anchor forward)
+        # when the anchor isn't configured so canonical AZ stays a free
+        # path. KL(anchor || learner) over the masked legal-action
+        # distribution; illegal slots already carry ~0 mass after the
+        # model's MASK_FILL_VALUE softmax, but we ``where``-mask the
+        # log-probs explicitly to avoid ``0 * -inf -> NaN``.
+        if self._bc_anchor is not None:
+            with torch.no_grad():
+                anchor_logits = self._bc_anchor.model(obs_t, mask_t).logits
+            anchor_log_probs = torch.log_softmax(anchor_logits, dim=-1)
+            anchor_probs = anchor_log_probs.exp()
+            safe_anchor_log = torch.where(
+                mask_t, anchor_log_probs, torch.zeros_like(anchor_log_probs)
+            )
+            kl_anchor_loss = (
+                anchor_probs * (safe_anchor_log - log_probs)
+            ).sum(dim=-1).mean()
+        else:
+            kl_anchor_loss = torch.zeros((), device=self._device)
+
         loss = (
             policy_loss
             + self._cfg.value_coef * value_loss
             + self._cfg.aux_value_coef * aux_value_loss
+            + self._cfg.bc_anchor_coef * kl_anchor_loss
         )
 
         self._optimizer.zero_grad(set_to_none=True)
@@ -461,6 +506,7 @@ class AlphaZeroTrainer:
             "policy_loss": float(policy_loss.item()),
             "value_loss": float(value_loss.item()),
             "aux_value_loss": float(aux_value_loss.item()),
+            "kl_anchor_loss": float(kl_anchor_loss.item()),
             "value_pred_std": value_pred_std,
             "total_loss": float(loss.item()),
             "grad_norm": float(grad_norm.item()),
@@ -581,6 +627,38 @@ class AlphaZeroTrainer:
             config_hash="alphazero",  # AZTrainConfig drifts independently of TrainConfig
         )
 
+    def _maybe_load_bc_anchor(self) -> PolicyAgent | None:
+        """Load + freeze the BC anchor for the KL regulariser, or None.
+
+        Raises ``ValueError`` if the two ``bc_anchor_*`` config fields
+        disagree (one set, the other at default) or the anchor isn't a
+        graph-encoder checkpoint (would consume a different obs layout).
+        """
+        path = self._cfg.bc_anchor_path
+        coef = self._cfg.bc_anchor_coef
+        if path is None and coef == 0.0:
+            return None
+        if path is None:
+            raise ValueError(
+                "bc_anchor_coef > 0 requires bc_anchor_path to be set"
+            )
+        if coef <= 0.0:
+            raise ValueError(
+                "bc_anchor_path is set but bc_anchor_coef <= 0; the "
+                "anchor would be loaded without contributing to the loss"
+            )
+        anchor, meta = load_checkpoint(Path(path), device=self._device)
+        if meta.model_arch.encoder_kind != "graph":
+            raise ValueError(
+                f"bc_anchor_path {path} has encoder_kind="
+                f"{meta.model_arch.encoder_kind!r}; AZ training requires "
+                "a graph-encoder anchor (same obs layout as the learner)"
+            )
+        anchor.model.eval()
+        for p in anchor.model.parameters():
+            p.requires_grad_(False)
+        return anchor
+
     def _default_env_factory(self, seed: int) -> CatanEnv:
         """Build a CatanEnv matching the learner's obs encoder.
 
@@ -659,6 +737,7 @@ class AlphaZeroTrainer:
             f"- weight decay (L2): {self._cfg.weight_decay}",
             f"- value coef: {self._cfg.value_coef}",
             f"- aux value coef (per-step VP): {self._cfg.aux_value_coef}",
+            f"- bc anchor: {_render_bc_anchor(self._cfg)}",
             f"- eval / snapshot cadence (iters): "
             f"{self._cfg.eval_every_iters} / {self._cfg.snapshot_every_iters}",
         ]
@@ -666,7 +745,7 @@ class AlphaZeroTrainer:
         lines += ["", "## Iterations", ""]
         cols = [
             "iter", "wall", "stale%", "moves/game",
-            "pol_loss", "val_loss", "aux_loss", "val_std",
+            "pol_loss", "val_loss", "aux_loss", "kl_anc", "val_std",
             "vs_rand", "vs_heur", "vs_prior",
             "buffer",
         ]
@@ -688,6 +767,7 @@ def _zero_update_metrics() -> dict[str, float]:
         "policy_loss": 0.0,
         "value_loss": 0.0,
         "aux_value_loss": 0.0,
+        "kl_anchor_loss": 0.0,
         "value_pred_std": 0.0,
         "total_loss": 0.0,
         "grad_norm": 0.0,
@@ -726,6 +806,13 @@ def _render_stalemate(stalemate) -> str:
     return f"{stalemate.shape} [{stalemate.low}, {stalemate.high}]"
 
 
+def _render_bc_anchor(cfg: AZTrainConfig) -> str:
+    """One-liner for the progress.md config block."""
+    if cfg.bc_anchor_path is None and cfg.bc_anchor_coef == 0.0:
+        return "off"
+    return f"{cfg.bc_anchor_path} (coef {cfg.bc_anchor_coef})"
+
+
 def _render_iter_row(summary: dict[str, float]) -> str:
     """One markdown table row from a per-iteration summary dict."""
     def _get(key: str) -> float | None:
@@ -740,6 +827,7 @@ def _render_iter_row(summary: dict[str, float]) -> str:
         f"{float(summary.get('train/policy_loss', 0.0)):.3f}",
         f"{float(summary.get('train/value_loss', 0.0)):.3f}",
         f"{float(summary.get('train/aux_value_loss', 0.0)):.3f}",
+        f"{float(summary.get('train/kl_anchor_loss', 0.0)):.3f}",
         f"{float(summary.get('train/value_pred_std', 0.0)):.3f}",
         _fmt_pct(_get("eval/vs_random/win_rate")),
         _fmt_pct(_get("eval/vs_heuristic/win_rate")),

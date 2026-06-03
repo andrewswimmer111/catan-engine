@@ -141,6 +141,23 @@ def test_parser_vp_linear_band_overrides_propagate() -> None:
     assert cfg.self_play.mcts.stalemate is cfg.self_play.stalemate
 
 
+def test_parser_bc_anchor_flags_propagate() -> None:
+    """``--bc-anchor-path`` and ``--bc-anchor-coef`` must land on the
+    corresponding ``AZTrainConfig`` fields. The constructor wires them
+    into the loss; this test pins only the CLI → config plumbing.
+    """
+    args = train_alphazero.build_parser().parse_args(
+        [
+            "--total-iters", "1",
+            "--bc-anchor-path", "runs/bc_001/final.pt",
+            "--bc-anchor-coef", "0.3",
+        ]
+    )
+    cfg = train_alphazero._build_config(args)
+    assert cfg.bc_anchor_path == Path("runs/bc_001/final.pt")
+    assert cfg.bc_anchor_coef == 0.3
+
+
 # ----------------------------------------------------------------------
 # Warm-start validation
 # ----------------------------------------------------------------------

@@ -121,6 +121,25 @@ def build_parser() -> argparse.ArgumentParser:
              "current VP / 10 at every state.",
     )
     p.add_argument(
+        "--bc-anchor-path",
+        type=Path,
+        default=None,
+        help="optional path to a frozen BC clone checkpoint used as a "
+             "KL anchor. When set together with --bc-anchor-coef > 0, "
+             "the trainer adds bc_anchor_coef * KL(anchor || learner) "
+             "to every batch's loss, pulling the learner toward the "
+             "anchor's policy distribution. Designed to prevent AZ "
+             "self-play from eroding BC-warm-start habits (e.g. road "
+             "building rate). Must be a graph-encoder checkpoint.",
+    )
+    p.add_argument(
+        "--bc-anchor-coef",
+        type=float,
+        default=AZTrainConfig.__dataclass_fields__["bc_anchor_coef"].default,
+        help="loss weight on the KL-to-BC-anchor term. 0.0 (default) "
+             "= off. Try 0.1 - 1.0; pair with --bc-anchor-path.",
+    )
+    p.add_argument(
         "--batch-size",
         type=int,
         default=AZTrainConfig.__dataclass_fields__["batch_size"].default,
@@ -356,6 +375,8 @@ def _build_config(args: argparse.Namespace) -> AZTrainConfig:
         weight_decay=args.weight_decay,
         value_coef=args.value_coef,
         aux_value_coef=args.aux_value_coef,
+        bc_anchor_path=args.bc_anchor_path,
+        bc_anchor_coef=args.bc_anchor_coef,
         batch_size=args.batch_size,
         batches_per_iter=args.batches_per_iter,
         max_grad_norm=args.max_grad_norm,
@@ -467,6 +488,10 @@ def _config_to_jsonable(cfg: AZTrainConfig, args: argparse.Namespace) -> dict:
             "weight_decay": cfg.weight_decay,
             "value_coef": cfg.value_coef,
             "aux_value_coef": cfg.aux_value_coef,
+            "bc_anchor_path": (
+                str(cfg.bc_anchor_path) if cfg.bc_anchor_path else None
+            ),
+            "bc_anchor_coef": cfg.bc_anchor_coef,
             "batch_size": cfg.batch_size,
             "batches_per_iter": cfg.batches_per_iter,
             "max_grad_norm": cfg.max_grad_norm,
