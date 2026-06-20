@@ -27,7 +27,7 @@ from domain.engine.game_engine import GameEngine
 from domain.engine.player_view import make_player_view
 from domain.engine.randomizer import SeededRandomizer
 from domain.ids import EdgeID, PlayerID, TileID, VertexID
-from gui.ai_agent import make_ai_agent
+from gui.ai_agent import find_latest_checkpoint, make_ai_agent
 from gui.widgets.action_panel import ActionPanel
 from gui.widgets.board_canvas import BoardCanvas
 from gui.widgets.event_log import EventLogWidget
@@ -160,6 +160,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Save Replay…", self._save_replay)
         menu.addAction("Load Replay…", self._load_replay)
         menu.addAction("Open RL Replay…", self._load_rl_replay)
+        menu.addSeparator()
+        menu.addAction("Use Latest AI Checkpoint", self._use_latest_checkpoint)
         menu.addSeparator()
         menu.addAction("Quit", self.close)
 
@@ -384,6 +386,23 @@ class MainWindow(QMainWindow):
         if not path_str:
             return None
         return Path(path_str)
+
+    def _use_latest_checkpoint(self) -> None:
+        """Cache the newest ``*.pt`` under ``runs/`` as the default for AI seats."""
+        latest = find_latest_checkpoint(self._default_runs_dir())
+        if latest is None:
+            QMessageBox.information(
+                self,
+                "No checkpoints found",
+                f"No *.pt files under {self._default_runs_dir()}",
+            )
+            return
+        self._last_checkpoint_path = latest
+        QMessageBox.information(
+            self,
+            "Latest checkpoint",
+            f"AI seats will default to:\n{latest}",
+        )
 
     @staticmethod
     def _default_runs_dir() -> Path:

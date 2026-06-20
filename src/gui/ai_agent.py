@@ -15,10 +15,26 @@ from pathlib import Path
 from controller.agents import Agent
 from rl.training.checkpoint import load_checkpoint
 
-__all__ = ["make_ai_agent"]
+__all__ = ["make_ai_agent", "find_latest_checkpoint"]
 
 
 def make_ai_agent(checkpoint_path: Path, *, device: str = "cpu") -> Agent:
     agent, _meta = load_checkpoint(Path(checkpoint_path), device=device)
     agent.stochastic_play = False
     return agent
+
+
+def find_latest_checkpoint(runs_dir: Path) -> Path | None:
+    """Return the most recently modified ``*.pt`` under ``runs_dir`` or None.
+
+    Recursive — checkpoints live one or two levels deep (``runs/<run>/final.pt``,
+    ``runs/<run>/checkpoints/iter_*.pt``). mtime is preferred over name parsing
+    because run-dir naming conventions have drifted across the project.
+    """
+    runs_dir = Path(runs_dir)
+    if not runs_dir.is_dir():
+        return None
+    candidates = list(runs_dir.rglob("*.pt"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
