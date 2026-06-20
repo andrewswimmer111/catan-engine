@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -9,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -24,6 +27,7 @@ from domain.engine.game_engine import GameEngine
 from domain.engine.player_view import make_player_view
 from domain.engine.randomizer import SeededRandomizer
 from domain.ids import EdgeID, PlayerID, TileID, VertexID
+from gui.ai_agent import make_ai_agent
 from gui.widgets.action_panel import ActionPanel
 from gui.widgets.board_canvas import BoardCanvas
 from gui.widgets.event_log import EventLogWidget
@@ -174,10 +178,12 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Seats:  "))
         self._seat_combos: dict[PlayerID, QComboBox] = {}
+        self._seat_prev_text: dict[PlayerID, str] = {}
         for pid in player_ids:
             toolbar.addWidget(QLabel(f"P{int(pid)}:"))
             combo = QComboBox()
-            combo.addItems(["HUMAN", "SCRIPTED"])
+            combo.addItems(["HUMAN", "SCRIPTED", "AI"])
+            self._seat_prev_text[pid] = "HUMAN"
             combo.currentTextChanged.connect(
                 lambda text, p=pid: self._on_seat_changed(p, text)
             )
@@ -339,8 +345,57 @@ class MainWindow(QMainWindow):
     def _on_seat_changed(self, player_id: PlayerID, text: str) -> None:
         if text == "SCRIPTED":
             self._orchestrator.set_agent(player_id, make_scripted_agent(player_id))
+        elif text == "AI":
+            if not self._assign_ai_seat(player_id):
+                self._revert_seat_combo(player_id)
+                return
         else:
             self._orchestrator.set_agent(player_id, HumanAgent())
+        self._seat_prev_text[player_id] = text
+
+    def _assign_ai_seat(self, player_id: PlayerID) -> bool:
+        """Prompt for a checkpoint and install a PolicyAgent on ``player_id``.
+
+        Returns False if the user cancels or loading fails so the caller can
+        revert the combo. A successfully chosen path is cached on the window
+        and pre-fills the dialog for subsequent AI seat selections.
+        """
+        path = self._prompt_for_checkpoint()
+        if path is None:
+            return False
+        try:
+            agent = make_ai_agent(path)
+        except Exception as exc:  # surface IncompatibleCheckpointError etc.
+            QMessageBox.critical(
+                self, "Load checkpoint failed", f"{path}\n\n{exc}"
+            )
+            return False
+        self._last_checkpoint_path = path
+        self._orchestrator.set_agent(player_id, agent)
+        return True
+
+    def _prompt_for_checkpoint(self) -> Path | None:
+        start_dir = str(
+            getattr(self, "_last_checkpoint_path", None) or self._default_runs_dir()
+        )
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Choose AI checkpoint", start_dir, "Checkpoints (*.pt)"
+        )
+        if not path_str:
+            return None
+        return Path(path_str)
+
+    @staticmethod
+    def _default_runs_dir() -> Path:
+        # repo_root/runs — main_window.py lives at <repo>/src/gui/, so up 3.
+        return Path(__file__).resolve().parents[2] / "runs"
+
+    def _revert_seat_combo(self, player_id: PlayerID) -> None:
+        combo = self._seat_combos[player_id]
+        prev = self._seat_prev_text.get(player_id, "HUMAN")
+        combo.blockSignals(True)
+        combo.setCurrentText(prev)
+        combo.blockSignals(False)
 
     def _on_step_once(self) -> None:
         self._orchestrator.step_once()
