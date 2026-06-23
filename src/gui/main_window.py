@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
 
         self._agents = make_default_agents(player_ids)
         self._orchestrator = Orchestrator(session, self._agents)
+        self._auto_advancing = False
 
         self._setup_menu()
         self._setup_toolbar(player_ids)
@@ -339,6 +340,18 @@ class MainWindow(QMainWindow):
     def refresh(self, snap: GameSnapshot) -> None:
         self._render(snap)
         self._event_log.on_applied(snap)
+        self._auto_advance()
+
+    def _auto_advance(self) -> None:
+        # Re-entrancy guard: run_until_human → apply → on_change → refresh
+        # would otherwise nest. The outer loop keeps stepping just fine.
+        if self._auto_advancing:
+            return
+        self._auto_advancing = True
+        try:
+            self._orchestrator.run_until_human()
+        finally:
+            self._auto_advancing = False
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -354,6 +367,8 @@ class MainWindow(QMainWindow):
         else:
             self._orchestrator.set_agent(player_id, HumanAgent())
         self._seat_prev_text[player_id] = text
+        # If the seat we just changed is currently on the move, start playing.
+        self._auto_advance()
 
     def _assign_ai_seat(self, player_id: PlayerID) -> bool:
         """Prompt for a checkpoint and install a PolicyAgent on ``player_id``.
